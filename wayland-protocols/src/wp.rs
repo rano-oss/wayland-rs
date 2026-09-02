@@ -216,6 +216,27 @@ pub mod input_method {
             []
         );
     }
+
+    /// Unstable version 3
+    pub mod zv3 {
+        wayland_protocol!(
+            "./protocols/unstable/input-method/input-method-unstable-v3.xml",
+            [crate::wp::text_input::zv3]
+        );
+    }
+}
+
+#[cfg(feature = "unstable")]
+pub mod keyboard_filter {
+    //! Keyboard filter protocol
+
+    /// Unstable version 1
+    pub mod zv1 {
+        wayland_protocol!(
+            "./protocols/unstable/keyboard-filter/keyboard-filter-unstable-v1.xml",
+            [crate::wp::input_method::zv3]
+        );
+    }
 }
 
 #[cfg(feature = "unstable")]
