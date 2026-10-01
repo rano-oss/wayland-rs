@@ -661,49 +661,24 @@
 
     <enum name="popup_position_mode" since="2">
       <description summary="popup positioning mode">
-        Controls how the compositor positions the popup relative to the text
-        input cursor rectangle.
+        How the compositor positions the popup relative to the text input
+        cursor rectangle.
       </description>
       <entry name="follow_cursor" value="0"
-             summary="track cursor rectangle updates"/>
+             summary="follow the cursor rectangle"/>
       <entry name="start_of_preedit" value="1"
-             summary="anchor popup at the start of each preedit segment"/>
+             summary="anchor at the start of the preedit"/>
     </enum>
 
     <request name="set_popup_position_mode" since="2">
       <description summary="set popup positioning mode">
-        Sets how the compositor positions this popup relative to the text input
+        Sets the popup positioning mode.
+
+        In follow_cursor mode (the default), the popup tracks the text input
         cursor rectangle.
 
-        In follow_cursor mode, which is the default, the compositor updates the
-        popup position whenever the text input cursor rectangle changes.
-        Switching to this mode clears any frozen preedit anchor.
-
-        In start_of_preedit mode, the compositor anchors the popup at the start
-        of the current preedit segment. Setting this mode does not reposition
-        the popup by itself.
-
-        When the input method sends set_preedit_string with non-empty text
-        while this mode is active and no anchor is frozen:
-
-        - For the first preedit in a composition sequence, the compositor
-          should freeze the anchor at the current text input cursor rectangle
-          and forward the preedit immediately.
-
-        - After commit_string cleared the frozen anchor from the previous
-          segment, the compositor should probe the preedit start by sending an
-          empty preedit with the cursor at (0, 0) to the text input client. The
-          compositor uses the cursor rectangle from the resulting text input
-          commit to freeze the anchor. If the text input client does not update
-          the cursor rectangle, the compositor may use the last known one.
-
-        While probing, the compositor may defer forwarding the requested
-        preedit and defer completing the input method commit request until the
-        anchor is known.
-
-        While an anchor is frozen, set_preedit_string updates the text input
-        client but does not move the popup anchor. commit_string clears the
-        frozen anchor for the next segment but does not reset this mode.
+        In start_of_preedit mode, the popup is positioned relative to the
+        start of the current preedit rather than the cursor within it.
 
         This state takes effect immediately and does not require a
         wl_surface.commit.
