@@ -1,8 +1,8 @@
 [package]
 name = "wayland-protocols-experimental"
-# The major version updates every time the protocols are pulled from wayland-protocols.
-# That's because experimental protocols version bumps are incompatible by definition.
-version = "20251230.0.3"
+# Local path-patch version must match SCTK's crates.io pin so [patch] replaces it.
+# Content includes xx preedit-start / protocol_compat ahead of upstream.
+version = "20250721.0.1"
 documentation = "https://docs.rs/wayland-protocols-experimental/"
 repository = "https://github.com/smithay/wayland-rs"
 authors = ["Elinor Berger <elinor@safaradeg.net>"]
@@ -14,19 +14,17 @@ edition = "2024"
 rust-version = "1.86"
 readme = "README.md"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-wayland-scanner = { version = "0.31.10", path = "../wayland-scanner" }
-wayland-backend = { version = "0.3.15", path = "../wayland-backend" }
-wayland-client = { version = "0.31.14", path = "../wayland-client", optional = true }
-wayland-server = { version = "0.31.13", path = "../wayland-server", optional = true }
-wayland-protocols = { version = "0.32.12", path = "../wayland-protocols", features=["unstable"] }
+wayland-scanner = { version = "0.31.11" }
+wayland-backend = { version = "0.3.15" }
+wayland-client = { version = "0.31.14", optional = true }
+wayland-server = { version = "0.31.14", optional = true }
+wayland-protocols = { version = "0.32.13", features = ["unstable"] }
 bitflags = "2"
 
 [features]
-client = ["wayland-client", "wayland-protocols/client"]
-server = ["wayland-server", "wayland-protocols/server"]
+client = ["dep:wayland-client", "wayland-protocols/client"]
+server = ["dep:wayland-server", "wayland-protocols/server"]
 
 [package.metadata.docs.rs]
 all-features = true

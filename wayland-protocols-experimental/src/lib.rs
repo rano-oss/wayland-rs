@@ -1,5 +1,5 @@
 //! This crate provides Wayland object definitions for experimental protocol extensions.
-//! 
+//!
 //! This crate provides bindings for protocols that are officially evaluated,
 //! but not recommended for use outside of testing.
 //!
@@ -30,6 +30,22 @@ pub mod session_management {
     }
 }
 
+/// Experimental text-input counterpart used for xx-input-method enum types.
+///
+/// Application text input remains [`wayland_protocols::wp::text_input`]; this
+/// module exists so xx-input-method can reference `xx_text_input_v3` enums and
+/// so compositors can optionally speak xx-text-input.
+pub mod text_input {
+    #[allow(missing_docs)]
+    pub mod v3 {
+        wayland_protocol!(
+            "./protocols/xx-text-input/xx-text-input-v3.xml",
+            []
+        );
+    }
+}
+
+/// Experimental input-method protocol (`xx_input_method_*`).
 pub mod input_method {
     //! This protocol allows applications to act as input methods for compositors.
     #[allow(missing_docs)]
@@ -41,24 +57,14 @@ pub mod input_method {
     }
 }
 
+/// Experimental keyboard filter protocol (`xx_keyboard_filter_*`).
 pub mod keyboard_filter {
     //! This protocol allows applications to intercept and filter keyboard events.
     #[allow(missing_docs)]
-    pub mod v3 {
+    pub mod v1 {
         wayland_protocol!(
             "./protocols/xx-keyboard-filter/xx-keyboard-filter-v1.xml",
             [crate::input_method::v1]
-        );
-    }
-}
-
-pub mod text_input {
-    //! This protocol allows applications to receive text composition events.
-    #[allow(missing_docs)]
-    pub mod v3 {
-        wayland_protocol!(
-            "./protocols/xx-text-input/xx-text-input-v3.xml",
-            []
         );
     }
 }
