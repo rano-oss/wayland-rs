@@ -1,7 +1,7 @@
 [package]
 name = "wayland-protocols-experimental"
-# Local path-patch version must match SCTK's crates.io pin so [patch] replaces it.
-# Content includes xx preedit-start / protocol_compat ahead of upstream.
+# Version matches crates.io pin used by SCTK 0.20 so downstream [patch] can replace it.
+# Content includes xx preedit-start / protocol_compat ahead of upstream release.
 version = "20250721.0.1"
 documentation = "https://docs.rs/wayland-protocols-experimental/"
 repository = "https://github.com/smithay/wayland-rs"
