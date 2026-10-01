@@ -1,17 +1,14 @@
 use std::{
     any::Any,
     fmt,
-    os::unix::{
-        io::{BorrowedFd, OwnedFd},
-        net::UnixStream,
-    },
+    os::unix::{io::BorrowedFd, net::UnixStream},
     sync::Arc,
 };
 
 #[cfg(doc)]
 use std::io::ErrorKind::WouldBlock;
 
-use crate::protocol::{Interface, Message, ObjectInfo};
+use crate::protocol::{Interface, Message, ObjectInfo, OwnedMessage};
 
 use super::client_impl;
 
@@ -33,11 +30,11 @@ pub trait ObjectData: AsAny + Any + Send + Sync {
     fn event(
         self: Arc<Self>,
         backend: &Backend,
-        msg: Message<ObjectId, OwnedFd>,
+        msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData>>;
 
     /// Notification that the object has been destroyed and is no longer active
-    fn destroyed(&self, object_id: ObjectId);
+    fn destroyed(&self, object_id: &ObjectId);
 
     /// Helper for forwarding a Debug implementation of your `ObjectData` type
     ///
@@ -119,7 +116,7 @@ impl ObjectId {
     ///
     /// See [`Backend::send_request()`] for details.
     #[inline]
-    pub fn null() -> ObjectId {
+    pub fn null() -> &'static ObjectId {
         client_impl::InnerBackend::null_id()
     }
 
@@ -219,7 +216,7 @@ impl Backend {
     ///
     /// Returns an error if the provided object ID is no longer valid.
     #[inline]
-    pub fn info(&self, id: ObjectId) -> Result<ObjectInfo, InvalidId> {
+    pub fn info(&self, id: &ObjectId) -> Result<ObjectInfo, InvalidId> {
         self.backend.info(id)
     }
 
@@ -252,7 +249,7 @@ impl Backend {
     ///   is `wl_registry.bind`), the `child_spec` must be provided.
     pub fn send_request(
         &self,
-        msg: Message<ObjectId, BorrowedFd>,
+        msg: Message<ObjectId>,
         data: Option<Arc<dyn ObjectData>>,
         child_spec: Option<(&'static Interface, u32)>,
     ) -> Result<ObjectId, InvalidId> {
@@ -264,7 +261,7 @@ impl Backend {
     /// Returns an error if the object ID is not longer valid or if it corresponds to a Wayland
     /// object that is not managed by this backend (when multiple libraries share the same Wayland
     /// socket via `libwayland` if using the system backend).
-    pub fn get_data(&self, id: ObjectId) -> Result<Arc<dyn ObjectData>, InvalidId> {
+    pub fn get_data(&self, id: &ObjectId) -> Result<Arc<dyn ObjectData>, InvalidId> {
         self.backend.get_data(id)
     }
 
@@ -273,7 +270,7 @@ impl Backend {
     /// Returns an error if the object ID is not longer valid or if it corresponds to a Wayland
     /// object that is not managed by this backend (when multiple libraries share the same Wayland
     /// socket via `libwayland` if using the system backend).
-    pub fn set_data(&self, id: ObjectId, data: Arc<dyn ObjectData>) -> Result<(), InvalidId> {
+    pub fn set_data(&self, id: &ObjectId, data: Arc<dyn ObjectData>) -> Result<(), InvalidId> {
         self.backend.set_data(id, data)
     }
 
@@ -364,13 +361,13 @@ impl ObjectData for DumbObjectData {
     fn event(
         self: Arc<Self>,
         _handle: &Backend,
-        _msg: Message<ObjectId, OwnedFd>,
+        _msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData>> {
         unreachable!()
     }
 
     #[cfg_attr(unstable_coverage, coverage(off))]
-    fn destroyed(&self, _object_id: ObjectId) {
+    fn destroyed(&self, _object_id: &ObjectId) {
         unreachable!()
     }
 }
@@ -382,13 +379,13 @@ impl ObjectData for UninitObjectData {
     fn event(
         self: Arc<Self>,
         _handle: &Backend,
-        msg: Message<ObjectId, OwnedFd>,
+        msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData>> {
         panic!("Received a message on an uninitialized object: {msg:?}");
     }
 
     #[cfg_attr(unstable_coverage, coverage(off))]
-    fn destroyed(&self, _object_id: ObjectId) {}
+    fn destroyed(&self, _object_id: &ObjectId) {}
 
     #[cfg_attr(unstable_coverage, coverage(off))]
     fn debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

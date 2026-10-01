@@ -1,6 +1,5 @@
 use std::ffi::CString;
 
-use crate::protocol::Message;
 use crate::types::client::InvalidId;
 
 use super::*;
@@ -14,8 +13,8 @@ macro_rules! impl_server_objectdata {
                 self: Arc<Self>,
                 _handle: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                _msg: Message<$server_backend::ObjectId, OwnedFd>,
+                _: &$server_backend::ClientId,
+                _msg: OwnedMessage<$server_backend::ObjectId>,
             ) -> Option<Arc<dyn $server_backend::ObjectData<()>>> {
                 Some(self)
             }
@@ -24,8 +23,8 @@ macro_rules! impl_server_objectdata {
                 self: Arc<Self>,
                 _: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                _: $server_backend::ObjectId,
+                _: &$server_backend::ClientId,
+                _: &$server_backend::ObjectId,
             ) {
             }
         }
@@ -35,9 +34,9 @@ macro_rules! impl_server_objectdata {
                 self: Arc<Self>,
                 _: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                _: $server_backend::GlobalId,
-                _: $server_backend::ObjectId,
+                _: &$server_backend::ClientId,
+                _: &$server_backend::GlobalId,
+                _: &$server_backend::ObjectId,
             ) -> Arc<dyn $server_backend::ObjectData<()>> {
                 self
             }
@@ -56,11 +55,11 @@ macro_rules! impl_client_objectdata {
             fn event(
                 self: Arc<Self>,
                 _handle: &$client_backend::Backend,
-                _msg: Message<$client_backend::ObjectId, OwnedFd>,
+                _msg: OwnedMessage<$client_backend::ObjectId>,
             ) -> Option<Arc<dyn $client_backend::ObjectData>> {
                 None
             }
-            fn destroyed(&self, _object_id: $client_backend::ObjectId) {}
+            fn destroyed(&self, _object_id: &$client_backend::ObjectId) {}
         }
     };
 }
@@ -85,7 +84,7 @@ expand_test!(destroy_global, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -94,7 +93,7 @@ expand_test!(destroy_global, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -133,7 +132,7 @@ expand_test!(destroy_twice, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -142,7 +141,7 @@ expand_test!(destroy_twice, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -182,7 +181,7 @@ expand_test!(destroy_flush_destroy, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -191,7 +190,7 @@ expand_test!(destroy_flush_destroy, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -238,7 +237,7 @@ expand_test!(destroy_then_message, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -247,7 +246,7 @@ expand_test!(destroy_then_message, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -278,7 +277,7 @@ expand_test!(destroy_then_message, {
     assert_eq!(
         client.send_request(
             message!(
-                test_global_id.clone(),
+                &test_global_id,
                 2,
                 [Argument::Object(client_backend::ObjectId::null()), Argument::Uint(1),],
             ),

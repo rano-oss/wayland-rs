@@ -12,9 +12,13 @@
 - `BindError` now includes the requested and available version, or interface name that failed to bind.
 - `GlobalList` now is updated with normal queueing, requires a `GlobalListHandler` implementation
 - Rename `GlobalList::bind` to `bind_singleton`
+- Replace `registry_queue_init` with `GlobalList::init`
+- `Connection::connect_to_env` is now marked `unsafe`. `connect_to_env_threadsafe` can be used if
+  invoked off the main thread, ignoring `WAYLAND_SOCKET`.
 
 #### Additions
 - Add `GlobalList::bind_specific`
+- Add `GlobalList::bind_all`
 - Updated Wayland core protocol to 1.26
 - Implement `AsRawFd` for `Connection` and `EventQueue`
 

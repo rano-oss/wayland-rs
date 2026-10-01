@@ -1,9 +1,6 @@
-use std::{
-    os::fd::OwnedFd,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use wayland_client::Proxy;
 use wayland_tests::{
@@ -71,7 +68,7 @@ fn destroy_object_objectdata() {
     roundtrip(&mut client, &mut server, &mut (), &mut ()).unwrap();
     assert!(callback_data.destroyed.load(Ordering::Relaxed));
     assert!(!registry_data.destroyed.load(Ordering::Relaxed));
-    backend.destroy_object(&registry.id()).unwrap();
+    backend.destroy_object(registry.id()).unwrap();
 }
 
 struct DestroyTestUdata {
@@ -83,12 +80,12 @@ impl wayc::backend::ObjectData for DestroyTestUdata {
     fn event(
         self: Arc<Self>,
         _: &wayc::backend::Backend,
-        _: wayc::backend::protocol::Message<wayc::backend::ObjectId, OwnedFd>,
+        _: wayc::backend::protocol::OwnedMessage<wayc::backend::ObjectId>,
     ) -> Option<Arc<dyn wayc::backend::ObjectData + 'static>> {
         None
     }
 
-    fn destroyed(&self, id: wayc::backend::ObjectId) {
+    fn destroyed(&self, id: &wayc::backend::ObjectId) {
         assert!(!self.destroyed.load(Ordering::Relaxed));
         assert!(!id.is_null());
         // `destroyed()` is called with object already marked as not alive, or it

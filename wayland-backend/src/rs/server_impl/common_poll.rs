@@ -1,5 +1,5 @@
 use std::{
-    os::unix::io::{AsRawFd, BorrowedFd, OwnedFd},
+    os::unix::io::{AsRawFd, BorrowedFd},
     sync::{Arc, Mutex},
 };
 
@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     core_interfaces::{WL_DISPLAY_INTERFACE, WL_REGISTRY_INTERFACE},
-    protocol::{Argument, Message, same_interface},
+    protocol::{OwnedArgument, OwnedMessage, same_interface},
     rs::map::Object,
     types::server::InitError,
 };
@@ -51,7 +51,7 @@ impl<D> InnerBackend<D> {
         Ok(Self { state: Arc::new(Mutex::new(State::new(poll_fd))) })
     }
 
-    pub fn flush(&self, client: Option<ClientId>) -> std::io::Result<()> {
+    pub fn flush(&self, client: Option<&ClientId>) -> std::io::Result<()> {
         self.state.lock().unwrap().flush(client)
     }
 
@@ -69,9 +69,9 @@ impl<D> InnerBackend<D> {
     pub fn dispatch_client(
         &self,
         data: &mut D,
-        client_id: InnerClientId,
+        client_id: &InnerClientId,
     ) -> std::io::Result<usize> {
-        let ret = self.dispatch_events_for(data, client_id);
+        let ret = self.dispatch_events_for(data, *client_id);
         let cleanup = self.state.lock().unwrap().cleanup();
         cleanup(&self.handle(), data);
         ret
@@ -152,7 +152,7 @@ impl<D> InnerBackend<D> {
         loop {
             let action = {
                 let state = &mut *state;
-                if let Ok(client) = state.clients.get_client_mut(client_id.clone()) {
+                if let Ok(client) = state.clients.get_client_mut(client_id) {
                     let (message, object) = match client.next_request() {
                         Ok(v) => v,
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -214,7 +214,7 @@ impl<D> InnerBackend<D> {
                             id: message.sender_id,
                             serial: object.data.serial,
                             interface: object.interface,
-                            client_id: client.id.clone(),
+                            client_id: client.id,
                         };
                         let opcode = message.opcode;
                         let (arguments, is_destructor, created_id) =
@@ -253,9 +253,9 @@ impl<D> InnerBackend<D> {
                     let ret = object.data.user_data.clone().request(
                         &handle.clone(),
                         data,
-                        ClientId { id: client_id.clone() },
-                        Message {
-                            sender_id: ObjectId { id: object_id.clone() },
+                        &ClientId { id: client_id },
+                        OwnedMessage {
+                            sender_id: ObjectId { id: object_id },
                             opcode,
                             args: arguments,
                         },
@@ -264,20 +264,20 @@ impl<D> InnerBackend<D> {
                         object.data.user_data.clone().destroyed(
                             &handle.clone(),
                             data,
-                            ClientId { id: client_id.clone() },
-                            ObjectId { id: object_id.clone() },
+                            &ClientId { id: client_id },
+                            &ObjectId { id: object_id },
                         );
                     }
                     // acquire the lock again and continue
                     state = self.state.lock().unwrap();
                     if is_destructor {
-                        if let Ok(client) = state.clients.get_client_mut(client_id.clone()) {
+                        if let Ok(client) = state.clients.get_client_mut(client_id) {
                             client.send_delete_id(object_id);
                         }
                     }
                     match (created_id, ret) {
                         (Some(child_id), Some(child_data)) => {
-                            if let Ok(client) = state.clients.get_client_mut(client_id.clone()) {
+                            if let Ok(client) = state.clients.get_client_mut(client_id) {
                                 client
                                     .map
                                     .with(child_id.id, |obj| obj.data.user_data = child_data)
@@ -288,7 +288,7 @@ impl<D> InnerBackend<D> {
                         (Some(child_id), None) => {
                             // Allow the callback to not return any data if the client is already dead (typically
                             // if the callback provoked a protocol error)
-                            if let Ok(client) = state.clients.get_client(client_id.clone()) {
+                            if let Ok(client) = state.clients.get_client(client_id) {
                                 if !client.killed {
                                     panic!(
                                         "Callback creating object {child_id} did not provide any object data."
@@ -314,13 +314,13 @@ impl<D> InnerBackend<D> {
                     let child_data = handler.bind(
                         &handle.clone(),
                         data,
-                        ClientId { id: client.clone() },
-                        GlobalId { id: global },
-                        ObjectId { id: object.clone() },
+                        &ClientId { id: client },
+                        &GlobalId { id: global },
+                        &ObjectId { id: object },
                     );
                     // acquire the lock again and continue
                     state = self.state.lock().unwrap();
-                    if let Ok(client) = state.clients.get_client_mut(client.clone()) {
+                    if let Ok(client) = state.clients.get_client_mut(client) {
                         client.map.with(object.id, |obj| obj.data.user_data = child_data).unwrap();
                     }
                 }
@@ -335,7 +335,7 @@ enum DispatchAction<D: 'static> {
         object: Object<Data<D>>,
         object_id: InnerObjectId,
         opcode: u16,
-        arguments: SmallVec<[Argument<ObjectId, OwnedFd>; 4]>,
+        arguments: SmallVec<[OwnedArgument<ObjectId>; 4]>,
         is_destructor: bool,
         created_id: Option<InnerObjectId>,
     },

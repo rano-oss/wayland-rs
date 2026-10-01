@@ -481,9 +481,9 @@ impl ObjectData for IgnoreObjectData {
     fn event(
         self: Arc<Self>,
         _: &wayland_client::backend::Backend,
-        _: wayland_client::backend::protocol::Message<wayland_client::backend::ObjectId, OwnedFd>,
+        _: wayland_client::backend::protocol::OwnedMessage<wayland_client::backend::ObjectId>,
     ) -> Option<Arc<dyn ObjectData>> {
         None
     }
-    fn destroyed(&self, _: wayland_client::backend::ObjectId) {}
+    fn destroyed(&self, _: &wayland_client::backend::ObjectId) {}
 }

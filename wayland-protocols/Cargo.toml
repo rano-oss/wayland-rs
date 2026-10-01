@@ -10,7 +10,6 @@ description = "Generated API for the officials wayland protocol extensions"
 categories = ["gui", "api-bindings"]
 edition = "2024"
 rust-version = "1.86"
-readme = "README.md"
 include = [
     "/src/**/*.rs",
     "/Cargo.toml",
@@ -35,11 +34,14 @@ wayland-server = { version = "0.31.13", path = "../wayland-server", optional = t
 bitflags = "2"
 
 [features]
-client = ["wayland-client"]
-server = ["wayland-server"]
+client = ["dep:wayland-client"]
+server = ["dep:wayland-server"]
 staging = []
 unstable = []
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.cargo]
+unused_dependencies = "allow"

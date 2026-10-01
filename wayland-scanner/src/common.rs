@@ -277,7 +277,13 @@ pub(crate) fn gen_message_enum(
                         Type::Int => quote! { i32 },
                         Type::Fixed => quote! { f64 },
                         Type::String => quote! { String },
-                        Type::Array => quote! { Vec<u8> },
+                        Type::Array => {
+                            if receiver {
+                                quote! { Vec<u8> }
+                            } else {
+                                quote! { &'a [u8] }
+                            }
+                        }
                         Type::Fd => {
                             if receiver {
                                 quote! { OwnedFd }
@@ -290,11 +296,23 @@ pub(crate) fn gen_message_enum(
                                 let iface_mod = Ident::new(iface, Span::call_site());
                                 let iface_type =
                                     Ident::new(&snake_to_camel(iface), Span::call_site());
-                                quote! { super::#iface_mod::#iface_type }
+                                if receiver {
+                                    quote! { super::#iface_mod::#iface_type }
+                                } else {
+                                    quote! { &'a super::#iface_mod::#iface_type }
+                                }
                             } else if side == Side::Client {
-                                quote! { super::wayland_client::ObjectId }
+                                if receiver {
+                                    quote! { super::wayland_client::ObjectId }
+                                } else {
+                                    quote! { &'a super::wayland_client::ObjectId }
+                                }
                             } else {
-                                quote! { super::wayland_server::ObjectId }
+                                if receiver {
+                                    quote! { super::wayland_server::ObjectId }
+                                } else {
+                                    quote! { &'a super::wayland_server::ObjectId }
+                                }
                             }
                         }
                         Type::NewId if !receiver && side == Side::Client => {
@@ -313,8 +331,10 @@ pub(crate) fn gen_message_enum(
                                     Ident::new(&snake_to_camel(iface), Span::call_site());
                                 if receiver && side == Side::Server {
                                     quote! { New<super::#iface_mod::#iface_type> }
-                                } else {
+                                } else if receiver {
                                     quote! { super::#iface_mod::#iface_type }
+                                } else {
+                                    quote! { &'a super::#iface_mod::#iface_type }
                                 }
                             } else {
                                 // bind-like function
@@ -437,14 +457,14 @@ pub(crate) fn gen_parse_body(interface: &Interface, side: Side) -> TokenStream {
                 Span::call_site(),
             );
             match arg.typ {
-                Type::Uint => quote!{ Some(Argument::Uint(#arg_name)) },
-                Type::Int => quote!{ Some(Argument::Int(#arg_name)) },
-                Type::String => quote!{ Some(Argument::Str(#arg_name)) },
-                Type::Fixed => quote!{ Some(Argument::Fixed(#arg_name)) },
-                Type::Array => quote!{ Some(Argument::Array(#arg_name)) },
-                Type::Object => quote!{ Some(Argument::Object(#arg_name)) },
-                Type::NewId => quote!{ Some(Argument::NewId(#arg_name)) },
-                Type::Fd => quote!{ Some(Argument::Fd(#arg_name)) },
+                Type::Uint => quote!{ Some(OwnedArgument::Uint(#arg_name)) },
+                Type::Int => quote!{ Some(OwnedArgument::Int(#arg_name)) },
+                Type::String => quote!{ Some(OwnedArgument::Str(#arg_name)) },
+                Type::Fixed => quote!{ Some(OwnedArgument::Fixed(#arg_name)) },
+                Type::Array => quote!{ Some(OwnedArgument::Array(#arg_name)) },
+                Type::Object => quote!{ Some(OwnedArgument::Object(#arg_name)) },
+                Type::NewId => quote!{ Some(OwnedArgument::NewId(#arg_name)) },
+                Type::Fd => quote!{ Some(OwnedArgument::Fd(#arg_name)) },
                 Type::Destructor => panic!("Argument {}.{}.{} has type destructor ?!", interface.name, msg.name, arg.name),
             }
         });
@@ -603,14 +623,14 @@ pub(crate) fn gen_write_body(interface: &Interface, side: Side) -> TokenStream {
                 Type::Fixed => vec![quote! { Argument::Fixed((#arg_name * 256.) as i32) }],
                 Type::Object => if arg.allow_null {
                     if side == Side::Server {
-                        vec![quote! { if let Some(obj) = #arg_name { Argument::Object(Resource::id(&obj)) } else { Argument::Object(ObjectId::null()) } }]
+                        vec![quote! { if let Some(obj) = #arg_name { Argument::Object(Resource::id(obj)) } else { Argument::Object(ObjectId::null()) } }]
                     } else {
-                        vec![quote! { if let Some(obj) = #arg_name { Argument::Object(Proxy::id(&obj)) } else { Argument::Object(ObjectId::null()) } }]
+                        vec![quote! { if let Some(obj) = #arg_name { Argument::Object(Proxy::id(obj)) } else { Argument::Object(ObjectId::null()) } }]
                     }
                 } else if side == Side::Server {
-                    vec![quote!{ Argument::Object(Resource::id(&#arg_name)) }]
+                    vec![quote!{ Argument::Object(Resource::id(#arg_name)) }]
                 } else {
-                    vec![quote!{ Argument::Object(Proxy::id(&#arg_name)) }]
+                    vec![quote!{ Argument::Object(Proxy::id(#arg_name)) }]
                 },
                 Type::Array => if arg.allow_null {
                     vec![quote! { if let Some(array) = #arg_name { Argument::Array(Box::new(array)) } else { Argument::Array(Box::new(Vec::new()))}}]
@@ -652,9 +672,9 @@ pub(crate) fn gen_write_body(interface: &Interface, side: Side) -> TokenStream {
                 } else {
                     // server-side NewId is the same as Object
                     if arg.allow_null {
-                        vec![quote! { if let Some(obj) = #arg_name { Argument::NewId(Resource::id(&obj)) } else { Argument::NewId(ObjectId::null()) } }]
+                        vec![quote! { if let Some(obj) = #arg_name { Argument::NewId(Resource::id(obj)) } else { Argument::NewId(ObjectId::null()) } }]
                     } else {
-                        vec![quote!{ Argument::NewId(Resource::id(&#arg_name)) }]
+                        vec![quote!{ Argument::NewId(Resource::id(#arg_name)) }]
                     }
                 },
                 Type::Destructor => panic!("Argument {}.{}.{} has type destructor ?!", interface.name, msg.name, arg.name),
@@ -686,7 +706,7 @@ pub(crate) fn gen_write_body(interface: &Interface, side: Side) -> TokenStream {
                     let child_spec = #child_spec;
                     let args = #args;
                     Ok((Message {
-                        sender_id: self.id.clone(),
+                        sender_id: &self.id,
                         opcode: #opcode,
                         args
                     }, child_spec))
@@ -695,7 +715,7 @@ pub(crate) fn gen_write_body(interface: &Interface, side: Side) -> TokenStream {
         } else {
             quote! {
                 #msg_type::#msg_name { #(#arg_names),* } => Ok(Message {
-                    sender_id: self.id.clone(),
+                    sender_id: &self.id,
                     opcode: #opcode,
                     args: #args,
                 })

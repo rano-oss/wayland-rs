@@ -67,7 +67,7 @@ fn generate_objects_for(interface: &Interface) -> TokenStream {
             use super::wayland_server::{
                 backend::{
                     smallvec, ObjectData, ObjectId, InvalidId, WeakHandle,
-                    protocol::{Argument, Message, Interface, same_interface}
+                    protocol::{Argument, Message, OwnedArgument, OwnedMessage, Interface, same_interface}
                 },
                 Resource, Dispatch, DisplayHandle, DispatchError, ResourceData, New, Weak,
             };
@@ -98,7 +98,7 @@ fn generate_objects_for(interface: &Interface) -> TokenStream {
             impl PartialEq<Weak<#iface_name>> for #iface_name {
                 #[inline]
                 fn eq(&self, other: &Weak<#iface_name>) -> bool {
-                    self.id == other.id()
+                    self.id == *other.id()
                 }
             }
 
@@ -126,8 +126,8 @@ fn generate_objects_for(interface: &Interface) -> TokenStream {
                 }
 
                 #[inline]
-                fn id(&self) -> ObjectId {
-                    self.id.clone()
+                fn id(&self) -> &ObjectId {
+                    &self.id
                 }
 
                 #[inline]
@@ -149,16 +149,16 @@ fn generate_objects_for(interface: &Interface) -> TokenStream {
                     if !same_interface(id.interface(), Self::interface()) && !id.is_null(){
                         return Err(InvalidId)
                     }
-                    let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-                    let data = conn.get_object_data(id.clone()).ok();
+                    let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+                    let data = conn.get_object_data(&id).ok();
                     Ok(#iface_name { id, data, version, handle: conn.backend_handle().downgrade() })
                 }
 
-                fn parse_request(conn: &DisplayHandle, msg: Message<ObjectId, OwnedFd>) -> Result<(Self, Self::Request), DispatchError> {
+                fn parse_request(conn: &DisplayHandle, msg: OwnedMessage<ObjectId>) -> Result<(Self, Self::Request), DispatchError> {
                     #parse_body
                 }
 
-                fn write_event<'a>(&self, conn: &DisplayHandle, msg: Self::Event<'a>) -> Result<Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>, InvalidId> {
+                fn write_event<'r, 'a: 'r, 'b: 'r>(&'a self, conn: &DisplayHandle, msg: Self::Event<'b>) -> Result<Message<'r, ObjectId>, InvalidId> {
                     #write_body
                 }
 
@@ -207,9 +207,9 @@ fn gen_methods(interface: &Interface) -> TokenStream {
                         }
                         Type::Array => {
                             if arg.allow_null {
-                                quote! { Option<Vec<u8>> }
+                                quote! { Option<&[u8]> }
                             } else {
-                                quote! { Vec<u8> }
+                                quote! { &[u8] }
                             }
                         }
                         Type::Fd => quote! { ::std::os::unix::io::BorrowedFd<'_> },
@@ -237,12 +237,6 @@ fn gen_methods(interface: &Interface) -> TokenStream {
                     format_ident!("{}{}", if is_keyword(&arg.name) { "_" } else { "" }, arg.name);
                 if arg.enum_.is_some() {
                     Some(quote! { #arg_name: #arg_name })
-                } else if arg.typ == Type::Object || arg.typ == Type::NewId {
-                    if arg.allow_null {
-                        Some(quote! { #arg_name: #arg_name.cloned() })
-                    } else {
-                        Some(quote! { #arg_name: #arg_name.clone() })
-                    }
                 } else {
                     Some(quote! { #arg_name })
                 }

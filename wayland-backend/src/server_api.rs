@@ -2,14 +2,11 @@ use std::{
     any::Any,
     ffi::CString,
     fmt,
-    os::unix::{
-        io::{BorrowedFd, OwnedFd},
-        net::UnixStream,
-    },
+    os::unix::{io::BorrowedFd, net::UnixStream},
     sync::Arc,
 };
 
-use crate::protocol::{Interface, Message, ObjectInfo};
+use crate::protocol::{Interface, Message, ObjectInfo, OwnedMessage};
 pub use crate::types::server::{Credentials, DisconnectReason, GlobalInfo, InitError, InvalidId};
 
 use super::server_impl;
@@ -30,16 +27,16 @@ pub trait ObjectData<D>: Any + Send + Sync {
         self: Arc<Self>,
         handle: &Handle,
         data: &mut D,
-        client_id: ClientId,
-        msg: Message<ObjectId, OwnedFd>,
+        client_id: &ClientId,
+        msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData<D>>>;
     /// Notification that the object has been destroyed and is no longer active
     fn destroyed(
         self: Arc<Self>,
         handle: &Handle,
         data: &mut D,
-        client_id: ClientId,
-        object_id: ObjectId,
+        client_id: &ClientId,
+        object_id: &ObjectId,
     );
     /// Helper for forwarding a Debug implementation of your `ObjectData` type
     ///
@@ -68,9 +65,9 @@ pub trait GlobalHandler<D>: Any + Send + Sync {
     /// Default implementation always return true.
     fn can_view(
         &self,
-        _client_id: ClientId,
+        _client_id: &ClientId,
         _client_data: &Arc<dyn ClientData>,
-        _global_id: GlobalId,
+        _global_id: &GlobalId,
     ) -> bool {
         true
     }
@@ -83,9 +80,9 @@ pub trait GlobalHandler<D>: Any + Send + Sync {
         self: Arc<Self>,
         handle: &Handle,
         data: &mut D,
-        client_id: ClientId,
-        global_id: GlobalId,
-        object_id: ObjectId,
+        client_id: &ClientId,
+        global_id: &GlobalId,
+        object_id: &ObjectId,
     ) -> Arc<dyn ObjectData<D>>;
     /// Helper for forwarding a Debug implementation of your `GlobalHandler` type
     ///
@@ -106,9 +103,9 @@ impl<D: 'static> std::fmt::Debug for dyn GlobalHandler<D> {
 /// A trait representing your data associated to a client
 pub trait ClientData: Any + Send + Sync {
     /// Notification that the client was initialized
-    fn initialized(&self, _client_id: ClientId) {}
+    fn initialized(&self, _client_id: &ClientId) {}
     /// Notification that the client is disconnected
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, _client_id: &ClientId, _reason: DisconnectReason) {}
     /// Helper for forwarding a Debug implementation of your `ClientData` type
     ///
     /// By default will just print `GlobalHandler { ... }`
@@ -152,7 +149,7 @@ impl ObjectId {
     ///
     /// This object ID is always invalid, and should be used for events with an optional `Object` argument.
     #[inline]
-    pub fn null() -> ObjectId {
+    pub fn null() -> &'static ObjectId {
         server_impl::InnerHandle::null_id()
     }
 
@@ -263,8 +260,8 @@ impl Handle {
     ///
     /// Returns an error if the provided object ID is no longer valid.
     #[inline]
-    pub fn object_info(&self, id: ObjectId) -> Result<ObjectInfo, InvalidId> {
-        self.handle.object_info(id.id)
+    pub fn object_info(&self, id: &ObjectId) -> Result<ObjectInfo, InvalidId> {
+        self.handle.object_info(&id.id)
     }
 
     /// Initializes a connection with a client.
@@ -281,20 +278,20 @@ impl Handle {
 
     /// Returns the id of the client which owns the object.
     #[inline]
-    pub fn get_client(&self, id: ObjectId) -> Result<ClientId, InvalidId> {
-        self.handle.get_client(id.id)
+    pub fn get_client(&self, id: &ObjectId) -> Result<ClientId, InvalidId> {
+        self.handle.get_client(&id.id)
     }
 
     /// Returns the data associated with a client.
     #[inline]
-    pub fn get_client_data(&self, id: ClientId) -> Result<Arc<dyn ClientData>, InvalidId> {
-        self.handle.get_client_data(id.id)
+    pub fn get_client_data(&self, id: &ClientId) -> Result<Arc<dyn ClientData>, InvalidId> {
+        self.handle.get_client_data(&id.id)
     }
 
     /// Retrive the [`Credentials`] of a client
     #[inline]
-    pub fn get_client_credentials(&self, id: ClientId) -> Result<Credentials, InvalidId> {
-        self.handle.get_client_credentials(id.id)
+    pub fn get_client_credentials(&self, id: &ClientId) -> Result<Credentials, InvalidId> {
+        self.handle.get_client_credentials(&id.id)
     }
 
     /// Invokes a closure for all clients connected to this server
@@ -304,7 +301,7 @@ impl Handle {
     /// You should thus store the relevant `ClientId` in a container of your choice and process
     /// them after this method has returned.
     #[inline]
-    pub fn with_all_clients(&self, f: impl FnMut(ClientId)) {
+    pub fn with_all_clients(&self, f: impl FnMut(&ClientId)) {
         self.handle.with_all_clients(f)
     }
 
@@ -317,21 +314,21 @@ impl Handle {
     #[inline]
     pub fn with_all_objects_for(
         &self,
-        client_id: ClientId,
-        f: impl FnMut(ObjectId),
+        client_id: &ClientId,
+        f: impl FnMut(&ObjectId),
     ) -> Result<(), InvalidId> {
-        self.handle.with_all_objects_for(client_id.id, f)
+        self.handle.with_all_objects_for(&client_id.id, f)
     }
 
     /// Retrieve the `ObjectId` for a wayland object given its protocol numerical ID
     #[inline]
     pub fn object_for_protocol_id(
         &self,
-        client_id: ClientId,
+        client_id: &ClientId,
         interface: &'static Interface,
         protocol_id: u32,
     ) -> Result<ObjectId, InvalidId> {
-        self.handle.object_for_protocol_id(client_id.id, interface, protocol_id)
+        self.handle.object_for_protocol_id(&client_id.id, interface, protocol_id)
     }
 
     /// Create a new object for given client
@@ -346,12 +343,12 @@ impl Handle {
     #[inline]
     pub fn create_object<D: 'static>(
         &self,
-        client_id: ClientId,
+        client_id: &ClientId,
         interface: &'static Interface,
         version: u32,
         data: Arc<dyn ObjectData<D>>,
     ) -> Result<ObjectId, InvalidId> {
-        self.handle.create_object(client_id.id, interface, version, data)
+        self.handle.create_object(&client_id.id, interface, version, data)
     }
 
     /// Destroy an object
@@ -381,7 +378,7 @@ impl Handle {
     /// - the message opcode must be valid for the sender interface
     /// - the argument list must match the prototype for the message associated with this opcode
     #[inline]
-    pub fn send_event(&self, msg: Message<ObjectId, BorrowedFd>) -> Result<(), InvalidId> {
+    pub fn send_event(&self, msg: Message<ObjectId>) -> Result<(), InvalidId> {
         self.handle.send_event(msg)
     }
 
@@ -392,18 +389,18 @@ impl Handle {
     #[inline]
     pub fn get_object_data<D: 'static>(
         &self,
-        id: ObjectId,
+        id: &ObjectId,
     ) -> Result<Arc<dyn ObjectData<D>>, InvalidId> {
-        self.handle.get_object_data(id.id)
+        self.handle.get_object_data(&id.id)
     }
 
     /// Returns the data associated with an object as a `dyn Any`
     #[inline]
     pub fn get_object_data_any(
         &self,
-        id: ObjectId,
+        id: &ObjectId,
     ) -> Result<Arc<dyn Any + Send + Sync>, InvalidId> {
-        self.handle.get_object_data_any(id.id)
+        self.handle.get_object_data_any(&id.id)
     }
 
     /// Sets the data associated with some object.
@@ -413,24 +410,24 @@ impl Handle {
     #[inline]
     pub fn set_object_data<D: 'static>(
         &self,
-        id: ObjectId,
+        id: &ObjectId,
         data: Arc<dyn ObjectData<D>>,
     ) -> Result<(), InvalidId> {
-        self.handle.set_object_data(id.id, data)
+        self.handle.set_object_data(&id.id, data)
     }
 
     /// Posts a protocol error on an object. This will also disconnect the client which created the object.
     #[inline]
-    pub fn post_error(&self, object_id: ObjectId, error_code: u32, message: CString) {
-        self.handle.post_error(object_id.id, error_code, message)
+    pub fn post_error(&self, object_id: &ObjectId, error_code: u32, message: CString) {
+        self.handle.post_error(&object_id.id, error_code, message)
     }
 
     /// Kills the connection to a client.
     ///
     /// The disconnection reason determines the error message that is sent to the client (if any).
     #[inline]
-    pub fn kill_client(&self, client_id: ClientId, reason: DisconnectReason) {
-        self.handle.kill_client(client_id.id, reason)
+    pub fn kill_client(&self, client_id: &ClientId, reason: DisconnectReason) {
+        self.handle.kill_client(&client_id.id, reason)
     }
 
     /// Creates a global of the specified interface and version and then advertises it to clients.
@@ -462,8 +459,8 @@ impl Handle {
     /// **Panic:** This method will panic if the type parameter `D` is not same to the same type as the
     /// one the backend was initialized with.
     #[inline]
-    pub fn disable_global<D: 'static>(&self, id: GlobalId) {
-        self.handle.disable_global::<D>(id.id)
+    pub fn disable_global<D: 'static>(&self, id: &GlobalId) {
+        self.handle.disable_global::<D>(&id.id)
     }
 
     /// Removes a global object and free its ressources.
@@ -481,14 +478,14 @@ impl Handle {
     /// **Panic:** This method will panic if the type parameter `D` is not same to the same type as the
     /// one the backend was initialized with.
     #[inline]
-    pub fn remove_global<D: 'static>(&self, id: GlobalId) {
-        self.handle.remove_global::<D>(id.id)
+    pub fn remove_global<D: 'static>(&self, id: &GlobalId) {
+        self.handle.remove_global::<D>(&id.id)
     }
 
     /// Returns information about a global.
     #[inline]
-    pub fn global_info(&self, id: GlobalId) -> Result<GlobalInfo, InvalidId> {
-        self.handle.global_info(id.id)
+    pub fn global_info(&self, id: &GlobalId) -> Result<GlobalInfo, InvalidId> {
+        self.handle.global_info(&id.id)
     }
 
     /// Get the name of the global.
@@ -497,23 +494,23 @@ impl Handle {
     #[doc(alias = "wl_global_get_name")]
     #[cfg(feature = "libwayland_server_1_22")]
     #[inline]
-    pub fn global_name(&self, global: GlobalId, client: ClientId) -> Option<u32> {
-        self.handle.global_name(global.id, client.id)
+    pub fn global_name(&self, global: &GlobalId, client: &ClientId) -> Option<u32> {
+        self.handle.global_name(&global.id, &client.id)
     }
 
     /// Returns the handler which manages the visibility and notifies when a client has bound the global.
     #[inline]
     pub fn get_global_handler<D: 'static>(
         &self,
-        id: GlobalId,
+        id: &GlobalId,
     ) -> Result<Arc<dyn GlobalHandler<D>>, InvalidId> {
-        self.handle.get_global_handler(id.id)
+        self.handle.get_global_handler(&id.id)
     }
 
     /// Flushes pending events destined for a client.
     ///
     /// If no client is specified, all pending events are flushed to all clients.
-    pub fn flush(&self, client: Option<ClientId>) -> std::io::Result<()> {
+    pub fn flush(&self, client: Option<&ClientId>) -> std::io::Result<()> {
         self.handle.flush(client)
     }
 
@@ -527,8 +524,8 @@ impl Handle {
 
     /// Set maximum buffer size for client.
     #[cfg(feature = "libwayland_server_1_23")]
-    pub fn set_client_max_buffer_size(&self, client: ClientId, max_buffer_size: usize) {
-        self.handle.set_client_max_buffer_size(client.id, max_buffer_size);
+    pub fn set_client_max_buffer_size(&self, client: &ClientId, max_buffer_size: usize) {
+        self.handle.set_client_max_buffer_size(&client.id, max_buffer_size);
     }
 }
 
@@ -552,7 +549,7 @@ impl<D> Backend<D> {
     ///
     /// If no client is specified, all pending events are flushed to all clients.
     #[inline]
-    pub fn flush(&self, client: Option<ClientId>) -> std::io::Result<()> {
+    pub fn flush(&self, client: Option<&ClientId>) -> std::io::Result<()> {
         self.backend.flush(client)
     }
 
@@ -594,9 +591,9 @@ impl<D> Backend<D> {
     pub fn dispatch_single_client(
         &self,
         data: &mut D,
-        client_id: ClientId,
+        client_id: &ClientId,
     ) -> std::io::Result<usize> {
-        self.backend.dispatch_client(data, client_id.id)
+        self.backend.dispatch_client(data, &client_id.id)
     }
 
     /// Dispatches all pending messages from all clients.
@@ -626,8 +623,8 @@ impl<D> ObjectData<D> for DumbObjectData {
         self: Arc<Self>,
         _handle: &Handle,
         _data: &mut D,
-        _client_id: ClientId,
-        _msg: Message<ObjectId, OwnedFd>,
+        _client_id: &ClientId,
+        _msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData<D>>> {
         unreachable!()
     }
@@ -637,8 +634,8 @@ impl<D> ObjectData<D> for DumbObjectData {
         self: Arc<Self>,
         _handle: &Handle,
         _: &mut D,
-        _client_id: ClientId,
-        _object_id: ObjectId,
+        _client_id: &ClientId,
+        _object_id: &ObjectId,
     ) {
     }
 }

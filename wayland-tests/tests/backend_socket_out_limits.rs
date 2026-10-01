@@ -221,11 +221,11 @@ impl wayc::backend::ObjectData for SyncData {
     fn event(
         self: Arc<Self>,
         _backend: &wayc::backend::Backend,
-        _msg: self::wayc::backend::protocol::Message<wayc::backend::ObjectId, OwnedFd>,
+        _msg: self::wayc::backend::protocol::OwnedMessage<wayc::backend::ObjectId>,
     ) -> Option<Arc<dyn ObjectData>> {
         self.done.store(true, Ordering::Release);
         None
     }
 
-    fn destroyed(&self, _: wayc::backend::ObjectId) {}
+    fn destroyed(&self, _: &wayc::backend::ObjectId) {}
 }

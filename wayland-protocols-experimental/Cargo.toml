@@ -12,7 +12,6 @@ description = "Generated API for experimental wayland protocol extensions"
 categories = ["gui", "api-bindings"]
 edition = "2024"
 rust-version = "1.86"
-readme = "README.md"
 
 [dependencies]
 wayland-scanner = { version = "0.31.11" }
@@ -29,3 +28,6 @@ server = ["dep:wayland-server", "wayland-protocols/server"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.cargo]
+unused_dependencies = "allow"

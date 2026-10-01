@@ -1,4 +1,3 @@
-use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use wayland_client::{
     Connection, Proxy,
@@ -16,7 +15,7 @@ impl backend::ObjectData for RegistryData {
     fn event(
         self: Arc<Self>,
         _: &Backend,
-        msg: backend::protocol::Message<backend::ObjectId, OwnedFd>,
+        msg: backend::protocol::OwnedMessage<backend::ObjectId>,
     ) -> Option<Arc<dyn backend::ObjectData>> {
         // Here, we parse the wire message into an event using Proxy::parse_event.
         let (_registry, event) = wl_registry::WlRegistry::parse_event(&self.0, msg).unwrap();
@@ -31,7 +30,7 @@ impl backend::ObjectData for RegistryData {
 
     // This method is called whenever the object is destroyed. In the case of our registry,
     // however, there is no way to destroy it, so we will mark it as unreachable.
-    fn destroyed(&self, _: wayland_backend::client::ObjectId) {
+    fn destroyed(&self, _: &wayland_backend::client::ObjectId) {
         unreachable!();
     }
 }
@@ -39,7 +38,8 @@ impl backend::ObjectData for RegistryData {
 fn main() {
     // Create our connection like the Dispatch example, except we store it in an Arc
     // to share with our registry object data.
-    let conn = Arc::new(Connection::connect_to_env().unwrap());
+    // SAFETY: Called at start of main before starting other threads
+    let conn = Arc::new(unsafe { Connection::connect_to_env() }.unwrap());
     let display = conn.display();
 
     let registry_data = Arc::new(RegistryData(conn.clone()));

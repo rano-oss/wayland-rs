@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- Update `quick-xml` to 0.41
+- Update `quick-xml` to 0.42
 
 #### Breaking changes
 - Generate tuple struct for enums, and don't use `WEnum`
+- Generated bindings now use `&[u8]` in arguments instead of `Vec<u8>`
 
 #### Additions
 - Add `available_since()` method for enums

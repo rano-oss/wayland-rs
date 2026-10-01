@@ -1,5 +1,4 @@
 use std::{
-    os::fd::OwnedFd,
     sync::{Arc, Barrier},
     thread,
 };
@@ -15,14 +14,14 @@ fn test_thread_destroy_object() {
     let backend = client.conn.backend();
 
     for _ in 0..10 {
-        let cb_id = client.display.sync(&qh, wayc::NoopIgnore).id();
+        let cb_id = client.display.sync(&qh, wayc::NoopIgnore).id().clone();
 
         let barrier = Barrier::new(2);
         thread::scope(|s| {
             s.spawn(|| {
                 barrier.wait();
                 for _ in 0..100 {
-                    let _ = backend.get_data(cb_id.clone());
+                    let _ = backend.get_data(&cb_id);
                 }
             });
 
@@ -49,13 +48,13 @@ fn test_thread_destroy_display() {
                 barrier.wait();
                 for _ in 0..100 {
                     // get_data on the display should succeed
-                    let _ = backend.get_data(display_id.clone());
+                    let _ = backend.get_data(display_id);
                 }
             });
 
             barrier.wait();
             // destroy_object on the display should return InvalidId
-            assert!(backend.destroy_object(&display_id).is_err());
+            assert!(backend.destroy_object(display_id).is_err());
         });
     }
 }
@@ -69,7 +68,7 @@ fn test_thread_destroys() {
     let backend = client.conn.backend();
 
     for _ in 0..10000 {
-        let cb_id = client.display.sync(&qh, wayc::NoopIgnore).id();
+        let cb_id = client.display.sync(&qh, wayc::NoopIgnore).id().clone();
 
         let barrier = Barrier::new(2);
         thread::scope(|s| {
@@ -94,22 +93,22 @@ fn test_set_data() {
     let qh = client.event_queue.handle();
     let backend = client.conn.backend();
 
-    let cb_id = client.display.sync(&qh, wayc::NoopIgnore).id();
+    let cb_id = client.display.sync(&qh, wayc::NoopIgnore).id().clone();
 
     backend
-        .get_data(cb_id.clone())
+        .get_data(&cb_id.clone())
         .unwrap()
         .data_as_any()
         .downcast_ref::<wayc::NoopIgnore>()
         .unwrap();
     backend
-        .get_data(cb_id.clone())
+        .get_data(&cb_id.clone())
         .unwrap()
         .data_as_any()
         .downcast_ref::<wayc::NoopIgnore>()
         .unwrap();
-    backend.set_data(cb_id.clone(), Arc::new(CustomObjectData)).unwrap();
-    let data = backend.get_data(cb_id.clone()).unwrap();
+    backend.set_data(&cb_id, Arc::new(CustomObjectData)).unwrap();
+    let data = backend.get_data(&cb_id).unwrap();
     let data = data.data_as_any();
     assert!(data.downcast_ref::<wayc::NoopIgnore>().is_none());
     data.downcast_ref::<CustomObjectData>().unwrap();
@@ -121,10 +120,10 @@ impl wayc::backend::ObjectData for CustomObjectData {
     fn event(
         self: Arc<Self>,
         _backend: &wayc::backend::Backend,
-        _msg: wayc::backend::protocol::Message<wayc::backend::ObjectId, OwnedFd>,
+        _msg: wayc::backend::protocol::OwnedMessage<wayc::backend::ObjectId>,
     ) -> Option<Arc<dyn wayc::backend::ObjectData>> {
         None
     }
 
-    fn destroyed(&self, _object_id: wayc::backend::ObjectId) {}
+    fn destroyed(&self, _object_id: &wayc::backend::ObjectId) {}
 }

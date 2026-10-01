@@ -17,11 +17,11 @@ impl server_rs::GlobalHandler<()> for ServerData<server_rs::ObjectId> {
         self: Arc<Self>,
         _: &server_rs::Handle,
         _: &mut (),
-        _: server_rs::ClientId,
-        _: server_rs::GlobalId,
-        object_id: server_rs::ObjectId,
+        _: &server_rs::ClientId,
+        _: &server_rs::GlobalId,
+        object_id: &server_rs::ObjectId,
     ) -> Arc<dyn server_rs::ObjectData<()>> {
-        *(self.0.lock().unwrap()) = Some(object_id);
+        *(self.0.lock().unwrap()) = Some(object_id.clone());
         Arc::new(DoNothingData)
     }
 }
@@ -31,11 +31,11 @@ impl server_sys::GlobalHandler<()> for ServerData<server_sys::ObjectId> {
         self: Arc<Self>,
         _: &server_sys::Handle,
         _: &mut (),
-        _: server_sys::ClientId,
-        _: server_sys::GlobalId,
-        object_id: server_sys::ObjectId,
+        _: &server_sys::ClientId,
+        _: &server_sys::GlobalId,
+        object_id: &server_sys::ObjectId,
     ) -> Arc<dyn server_sys::ObjectData<()>> {
-        *(self.0.lock().unwrap()) = Some(object_id);
+        *(self.0.lock().unwrap()) = Some(object_id.clone());
         Arc::new(DoNothingData)
     }
 }
@@ -59,7 +59,7 @@ expand_test!(protocol_error, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -68,7 +68,7 @@ expand_test!(protocol_error, {
     client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -91,7 +91,7 @@ expand_test!(protocol_error, {
     let oid = object_id.lock().unwrap().clone().unwrap();
 
     // post the error
-    server.handle().post_error(oid, 42, CString::new("I don't like you.".as_bytes()).unwrap());
+    server.handle().post_error(&oid, 42, CString::new("I don't like you.".as_bytes()).unwrap());
 
     server.flush(None).unwrap();
     let ret = client.prepare_read().unwrap().read();
@@ -121,10 +121,10 @@ expand_test!(client_wrong_id, {
 
     socket
         .write_message(&Message {
-            sender_id: 1, // wl_display
-            opcode: 1,    // wl_registry
+            sender_id: &1, // wl_display
+            opcode: 1,     // wl_registry
             args: smallvec::smallvec![
-                Argument::NewId(3), // should be 2
+                Argument::NewId(&3), // should be 2
             ],
         })
         .unwrap();
@@ -147,8 +147,8 @@ expand_test!(client_wrong_opcode, {
 
     socket
         .write_message(&Message {
-            sender_id: 1, // wl_display
-            opcode: 42,   // inexistant
+            sender_id: &1, // wl_display
+            opcode: 42,    // inexistant
             args: smallvec::smallvec![],
         })
         .unwrap();
@@ -171,8 +171,8 @@ expand_test!(client_wrong_sender, {
 
     socket
         .write_message(&Message {
-            sender_id: 2, // inexistant
-            opcode: 0,    //
+            sender_id: &2, // inexistant
+            opcode: 0,     //
             args: smallvec::smallvec![],
         })
         .unwrap();
@@ -193,9 +193,9 @@ impl server_rs::GlobalHandler<()> for ProtocolErrorServerData {
         self: Arc<Self>,
         _: &server_rs::Handle,
         _: &mut (),
-        _: server_rs::ClientId,
-        _: server_rs::GlobalId,
-        _: server_rs::ObjectId,
+        _: &server_rs::ClientId,
+        _: &server_rs::GlobalId,
+        _: &server_rs::ObjectId,
     ) -> Arc<dyn server_rs::ObjectData<()>> {
         Arc::new(ProtocolErrorServerData)
     }
@@ -206,9 +206,9 @@ impl server_sys::GlobalHandler<()> for ProtocolErrorServerData {
         self: Arc<Self>,
         _: &server_sys::Handle,
         _: &mut (),
-        _: server_sys::ClientId,
-        _: server_sys::GlobalId,
-        _: server_sys::ObjectId,
+        _: &server_sys::ClientId,
+        _: &server_sys::GlobalId,
+        _: &server_sys::ObjectId,
     ) -> Arc<dyn server_sys::ObjectData<()>> {
         Arc::new(ProtocolErrorServerData)
     }
@@ -219,10 +219,10 @@ impl<D> server_rs::ObjectData<D> for ProtocolErrorServerData {
         self: Arc<Self>,
         handle: &server_rs::Handle,
         _: &mut D,
-        _: server_rs::ClientId,
-        msg: Message<server_rs::ObjectId, OwnedFd>,
+        _: &server_rs::ClientId,
+        msg: OwnedMessage<server_rs::ObjectId>,
     ) -> Option<Arc<dyn server_rs::ObjectData<D>>> {
-        handle.post_error(msg.sender_id, 0, CString::new("I don't like you.".as_bytes()).unwrap());
+        handle.post_error(&msg.sender_id, 0, CString::new("I don't like you.".as_bytes()).unwrap());
         None
     }
 
@@ -230,8 +230,8 @@ impl<D> server_rs::ObjectData<D> for ProtocolErrorServerData {
         self: Arc<Self>,
         _handle: &server_rs::Handle,
         _: &mut D,
-        _: server_rs::ClientId,
-        _: server_rs::ObjectId,
+        _: &server_rs::ClientId,
+        _: &server_rs::ObjectId,
     ) {
     }
 }
@@ -241,10 +241,10 @@ impl<D> server_sys::ObjectData<D> for ProtocolErrorServerData {
         self: Arc<Self>,
         handle: &server_sys::Handle,
         _: &mut D,
-        _: server_sys::ClientId,
-        msg: Message<server_sys::ObjectId, OwnedFd>,
+        _: &server_sys::ClientId,
+        msg: OwnedMessage<server_sys::ObjectId>,
     ) -> Option<Arc<dyn server_sys::ObjectData<D>>> {
-        handle.post_error(msg.sender_id, 0, CString::new("I don't like you.".as_bytes()).unwrap());
+        handle.post_error(&msg.sender_id, 0, CString::new("I don't like you.".as_bytes()).unwrap());
         None
     }
 
@@ -252,8 +252,8 @@ impl<D> server_sys::ObjectData<D> for ProtocolErrorServerData {
         self: Arc<Self>,
         _handle: &server_sys::Handle,
         _: &mut D,
-        _: server_sys::ClientId,
-        _: server_sys::ObjectId,
+        _: &server_sys::ClientId,
+        _: &server_sys::ObjectId,
     ) {
     }
 }
@@ -277,7 +277,7 @@ expand_test!(protocol_error_in_request_without_object_init, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -286,7 +286,7 @@ expand_test!(protocol_error_in_request_without_object_init, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -308,7 +308,7 @@ expand_test!(protocol_error_in_request_without_object_init, {
     // Now, the client sends a request, which will trigger a protocol error
     client
         .send_request(
-            message!(test_global_id, 1, [Argument::NewId(client_backend::ObjectId::null())]),
+            message!(&test_global_id, 1, [Argument::NewId(client_backend::ObjectId::null())]),
             Some(Arc::new(DoNothingData)),
             None,
         )
@@ -339,9 +339,9 @@ expand_test!(protocol_version_check, {
 
     socket
         .write_message(&Message {
-            sender_id: 1,
+            sender_id: &1,
             opcode: 1,
-            args: smallvec::smallvec![Argument::NewId(2),],
+            args: smallvec::smallvec![Argument::NewId(&2),],
         })
         .unwrap();
     socket.flush().unwrap();
@@ -350,7 +350,7 @@ expand_test!(protocol_version_check, {
 
     socket
         .write_message(&Message {
-            sender_id: 2,
+            sender_id: &2,
             opcode: 0,
             args: smallvec::smallvec![
                 Argument::Uint(1),
@@ -358,7 +358,7 @@ expand_test!(protocol_version_check, {
                     CString::new(interfaces::TEST_GLOBAL_INTERFACE.name.as_bytes()).unwrap()
                 ))),
                 Argument::Uint(2),
-                Argument::NewId(3),
+                Argument::NewId(&3),
             ],
         })
         .unwrap();
@@ -368,9 +368,9 @@ expand_test!(protocol_version_check, {
 
     socket
         .write_message(&Message {
-            sender_id: 3,
+            sender_id: &3,
             opcode: 2,
-            args: smallvec::smallvec![Argument::NewId(4),],
+            args: smallvec::smallvec![Argument::NewId(&4),],
         })
         .unwrap();
     socket.flush().unwrap();

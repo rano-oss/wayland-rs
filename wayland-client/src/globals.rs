@@ -4,8 +4,8 @@
 //! advertized by the compositor from the registry. Using the [`Dispatch`] mechanism for this task can be
 //! very unpractical, this is why this module provides a special helper for handling the registry.
 //!
-//! The entry point of this helper is the [`registry_queue_init`] function. Given a reference to your
-//! [`Connection`] it will create an [`EventQueue`], retrieve the initial list of globals, and register a
+//! The entry point of this helper is the [`GlobalList::init`] function. Given a reference to your
+//! [`Connection`] and a [`QueueHandle`], retrieve the initial list of globals, and register a
 //! handler using your provided `Dispatch<WlRegistry,_>` implementation for handling dynamic registry events.
 //!
 //! ## Example
@@ -13,7 +13,7 @@
 //! ```no_run
 //! use wayland_client::{
 //!     Connection, Dispatch, QueueHandle,
-//!     globals::{registry_queue_init, Global, GlobalListHandler},
+//!     globals::{Global, GlobalList, GlobalListHandler},
 //!     protocol::{wl_registry, wl_compositor},
 //! };
 //! # use std::sync::Mutex;
@@ -24,8 +24,9 @@
 //!     /* react to dynamic global events here */
 //! }
 //!
-//! let conn = Connection::connect_to_env().unwrap();
-//! let (globals, queue) = registry_queue_init::<State>(&conn).unwrap();
+//! let conn = unsafe { Connection::connect_to_env() }.unwrap();
+//! let mut queue = conn.new_event_queue();
+//! let globals = GlobalList::init(&conn, &queue.handle()).unwrap();
 //!
 //! # impl wayland_client::Dispatch<wl_compositor::WlCompositor, State> for () {
 //! #     fn event(
@@ -44,7 +45,6 @@
 use std::{
     fmt,
     ops::RangeInclusive,
-    os::unix::io::OwnedFd,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -53,41 +53,16 @@ use std::{
 
 use wayland_backend::{
     client::{Backend, InvalidId, ObjectData, ObjectId, WaylandError},
-    protocol::Message,
+    protocol::{Interface, OwnedMessage},
 };
 
 use crate::{
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle,
     protocol::{wl_display, wl_fixes, wl_registry},
 };
 
-/// Initialize a new event queue with its associated registry and retrieve the initial list of globals
-///
-/// See [the module level documentation][self] for more.
-pub fn registry_queue_init<State>(
-    conn: &Connection,
-) -> Result<(GlobalList, EventQueue<State>), GlobalError>
-where
-    State: GlobalListHandler + 'static,
-{
-    let event_queue = conn.new_event_queue();
-    let display = conn.display();
-    let fixes = OnceLock::<wl_fixes::WlFixes>::new();
-
-    let data = Arc::new(RegistryState {
-        globals: GlobalListContents { contents: Default::default(), fixes },
-        handle: event_queue.handle(),
-        initial_roundtrip_done: AtomicBool::new(false),
-    });
-    let registry = display.send_constructor(wl_display::Request::GetRegistry {}, data.clone())?;
-    // We don't need to dispatch the event queue as for now nothing will be sent to it
-    conn.roundtrip()?;
-    data.initial_roundtrip_done.store(true, Ordering::Relaxed);
-    Ok((GlobalList { registry }, event_queue))
-}
-
 /// Handler for runtime global addition/removal in [`GlobalList`] created with
-/// [`registry_queue_init`]
+/// [`GlobalList::init`]
 pub trait GlobalListHandler: Sized {
     /// A global has been added dynamically after creation of the [`GlobalList`]
     ///
@@ -123,9 +98,39 @@ pub struct GlobalList {
 }
 
 impl GlobalList {
-    /// Access the contents of the list of globals
-    pub fn contents(&self) -> &GlobalListContents {
-        self.registry.data::<GlobalListContents>().unwrap()
+    /// Initialize registry and retrieve the initial list of globals
+    ///
+    /// See [the module level documentation][self] for more.
+    pub fn init<State>(
+        conn: &Connection,
+        qh: &QueueHandle<State>,
+    ) -> Result<GlobalList, GlobalError>
+    where
+        State: GlobalListHandler + 'static,
+    {
+        let display = conn.display();
+        let fixes = OnceLock::<wl_fixes::WlFixes>::new();
+
+        let data = Arc::new(RegistryState {
+            data: GlobalListData { contents: Default::default(), fixes },
+            handle: qh.clone(),
+            initial_roundtrip_done: AtomicBool::new(false),
+        });
+        let registry =
+            display.send_constructor(wl_display::Request::GetRegistry {}, data.clone())?;
+        // We don't need to dispatch the event queue as for now nothing will be sent to it
+        conn.roundtrip()?;
+        data.initial_roundtrip_done.store(true, Ordering::Relaxed);
+        Ok(GlobalList { registry })
+    }
+
+    fn data(&self) -> &GlobalListData {
+        self.registry.data::<GlobalListData>().unwrap()
+    }
+
+    /// Get a copy of the contents of the list of globals.
+    pub fn clone_list(&self) -> Vec<Global> {
+        self.data().contents.lock().unwrap().clone()
     }
 
     /// Binds a global, returning a new protocol object associated with the global.
@@ -160,26 +165,43 @@ impl GlobalList {
         U: Dispatch<I, State> + Send + Sync + 'static,
     {
         let interface = I::interface();
+        assert_valid_interface_version(&version, interface);
 
-        if *version.end() > interface.version {
-            // This is a panic because it's a compile-time programmer error, not a runtime error.
-            panic!(
-                "Maximum version ({}) of {} was higher than the proxy's maximum version ({}); outdated wayland XML files?",
-                version.end(),
-                interface.name,
-                interface.version
-            );
-        }
-
-        let globals = &self.registry.data::<GlobalListContents>().unwrap().contents;
-        let guard = globals.lock().unwrap();
+        let guard = self.data().contents.lock().unwrap();
         let global = guard
             .iter()
             // Find the global with the correct interface
             .find(|Global { interface: interface_name, .. }| interface.name == interface_name)
             .ok_or(BindError::NotPresent(interface.name))?;
 
-        self.bind_inner(qh, global, version, udata)
+        self.bind_inner(global, version, qh, udata)
+    }
+
+    /// Binds all globals with a given interface.
+    ///
+    /// Typically for globals with multiple instances, this should be called at start,
+    /// globals added later should be handled in [`GlobalListHandler::runtime_add_global`]
+    /// using `[Self::bind_specific]`.
+    pub fn bind_all<I, State, U>(
+        &self,
+        version: std::ops::RangeInclusive<u32>,
+        qh: &QueueHandle<State>,
+        mut make_udata: impl FnMut(&Global) -> U,
+    ) -> Result<Vec<I>, BindError>
+    where
+        I: Proxy + 'static,
+        State: 'static,
+        U: Dispatch<I, State> + Send + Sync + 'static,
+    {
+        let interface = I::interface();
+        assert_valid_interface_version(&version, interface);
+
+        let guard = self.data().contents.lock().unwrap();
+        guard
+            .iter()
+            .filter(|global| global.interface == interface.name)
+            .map(|global| self.bind_inner(global, version.clone(), qh, make_udata(global)))
+            .collect()
     }
 
     /// Binds a global, returning a new object associated with the global.
@@ -201,34 +223,26 @@ impl GlobalList {
         U: Dispatch<I, State> + Send + Sync + 'static,
     {
         let interface = I::interface();
+        assert_valid_interface_version(&version, interface);
 
-        if *version.end() > interface.version {
-            // This is a panic because it's a compile-time programmer error, not a runtime error.
-            panic!(
-                "Maximum version ({}) of {} was higher than the proxy's maximum version ({}); outdated wayland XML files?",
-                version.end(),
-                interface.name,
-                interface.version
-            );
-        }
-
-        let globals = &self.registry.data::<GlobalListContents>().unwrap().contents;
-        let guard = globals.lock().unwrap();
+        let guard = self.data().contents.lock().unwrap();
         let global = guard
             .iter()
+            // Optimize for `runtime_add_global` which will use the last entry
+            .rev()
             // Find the global with correct name and interface
             .find(|global| global.name == name && global.interface == interface.name)
             // TODO Error for not finding name, rather than interface?
             .ok_or(BindError::NotPresent(interface.name))?;
 
-        self.bind_inner(qh, global, version, udata)
+        self.bind_inner(global, version, qh, udata)
     }
 
     fn bind_inner<I, State, U>(
         &self,
-        qh: &QueueHandle<State>,
         global: &Global,
         version: RangeInclusive<u32>,
+        qh: &QueueHandle<State>,
         udata: U,
     ) -> Result<I, BindError>
     where
@@ -267,11 +281,11 @@ impl GlobalList {
     /// This might end up doing nothing if the compositor doesn't support `wl_fixes`
     /// in which case the registry cannot be destroyed without closing the connection.
     pub fn destroy(self) {
-        if let Some(fixes) = self.contents().fixes.get() {
+        if let Some(fixes) = self.data().fixes.get() {
             let id = self.registry.id();
             fixes.destroy_registry(&self.registry);
             if let Some(backend) = fixes.backend().upgrade() {
-                backend.destroy_object(&id).unwrap();
+                backend.destroy_object(id).unwrap();
             }
             fixes.destroy();
         }
@@ -373,28 +387,13 @@ pub struct Global {
     pub version: u32,
 }
 
-/// A container representing the current contents of the list of globals
 #[derive(Debug)]
-pub struct GlobalListContents {
+struct GlobalListData {
     contents: Mutex<Vec<Global>>,
     fixes: OnceLock<wl_fixes::WlFixes>,
 }
 
-impl GlobalListContents {
-    /// Access the list of globals
-    ///
-    /// Your closure is invoked on the global list, and its return value is forwarded to the return value
-    /// of this function. This allows you to process the list without making a copy.
-    pub fn with_list<T, F: FnOnce(&[Global]) -> T>(&self, f: F) -> T {
-        let guard = self.contents.lock().unwrap();
-        f(&guard)
-    }
-
-    /// Get a copy of the contents of the list of globals.
-    pub fn clone_list(&self) -> Vec<Global> {
-        self.contents.lock().unwrap().clone()
-    }
-
+impl GlobalListData {
     fn add(&self, global: Global) {
         self.contents.lock().unwrap().push(global);
     }
@@ -406,7 +405,7 @@ impl GlobalListContents {
     }
 }
 
-impl<D> Dispatch<wl_registry::WlRegistry, D> for GlobalListContents
+impl<D> Dispatch<wl_registry::WlRegistry, D> for GlobalListData
 where
     D: GlobalListHandler,
 {
@@ -435,7 +434,7 @@ where
 }
 
 struct RegistryState<State> {
-    globals: GlobalListContents,
+    data: GlobalListData,
     handle: QueueHandle<State>,
     initial_roundtrip_done: AtomicBool,
 }
@@ -447,10 +446,10 @@ where
     fn event(
         self: Arc<Self>,
         backend: &Backend,
-        msg: Message<ObjectId, OwnedFd>,
+        msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData>> {
         // For initial roundtrip, update immediately without waiting for dispatch.
-        // So globals are available after `registry_queue_init` returns.
+        // So globals are available after `GlobalList::init` returns.
         // later, handle in `Dispatch` implementation.
         if !self.initial_roundtrip_done.load(Ordering::Relaxed) {
             let conn = Connection::from_backend(backend.clone());
@@ -460,7 +459,7 @@ where
                     wl_registry::Event::Global { name, interface, version } => {
                         let wl_fixes_ver = 1u32..=1;
                         if interface == "wl_fixes" && version >= *wl_fixes_ver.start() {
-                            let _ = self.globals.fixes.set(registry.bind(
+                            let _ = self.data.fixes.set(registry.bind(
                                 name,
                                 version.min(*wl_fixes_ver.end()),
                                 &self.handle,
@@ -468,11 +467,11 @@ where
                             ));
                         }
 
-                        self.globals.add(Global { name, interface, version });
+                        self.data.add(Global { name, interface, version });
                     }
 
                     wl_registry::Event::GlobalRemove { name: remove } => {
-                        self.globals.remove(remove);
+                        self.data.remove(remove);
                     }
                 }
             };
@@ -482,16 +481,28 @@ where
                 .inner
                 .lock()
                 .unwrap()
-                .enqueue_event::<wl_registry::WlRegistry, GlobalListContents>(msg, self.clone())
+                .enqueue_event::<wl_registry::WlRegistry, GlobalListData>(msg, self.clone())
         }
 
         // We do not create any objects in this event handler.
         None
     }
 
-    fn destroyed(&self, _id: ObjectId) {}
+    fn destroyed(&self, _id: &ObjectId) {}
 
     fn data_as_any(&self) -> &dyn std::any::Any {
-        &self.globals
+        &self.data
+    }
+}
+
+fn assert_valid_interface_version(version: &RangeInclusive<u32>, interface: &'static Interface) {
+    if *version.end() > interface.version {
+        // This is a panic because it's a compile-time programmer error, not a runtime error.
+        panic!(
+            "Maximum version ({}) of {} was higher than the proxy's maximum version ({}); outdated wayland XML files?",
+            version.end(),
+            interface.name,
+            interface.version
+        );
     }
 }

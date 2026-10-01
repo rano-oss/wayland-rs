@@ -4,7 +4,7 @@ pub mod wl_display {
         Connection, Dispatch, DispatchError, Proxy, QueueHandle, QueueProxyData, Weak,
         backend::{
             Backend, InvalidId, ObjectData, ObjectId, WeakBackend,
-            protocol::{Argument, Interface, Message, same_interface},
+            protocol::{Argument, Interface, Message, OwnedArgument, OwnedMessage, same_interface},
             smallvec,
         },
     };
@@ -151,7 +151,7 @@ pub mod wl_display {
     impl std::cmp::Eq for WlDisplay {}
     impl PartialEq<Weak<WlDisplay>> for WlDisplay {
         fn eq(&self, other: &Weak<WlDisplay>) -> bool {
-            self.id == other.id()
+            self.id == *other.id()
         }
     }
     impl std::borrow::Borrow<ObjectId> for WlDisplay {
@@ -172,8 +172,8 @@ pub mod wl_display {
             &super::WL_DISPLAY_INTERFACE
         }
         #[inline]
-        fn id(&self) -> ObjectId {
-            self.id.clone()
+        fn id(&self) -> &ObjectId {
+            &self.id
         }
         #[inline]
         fn version(&self) -> u32 {
@@ -190,27 +190,27 @@ pub mod wl_display {
             if !same_interface(id.interface(), Self::interface()) && !id.is_null() {
                 return Err(InvalidId);
             }
-            let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-            let data = conn.get_object_data(id.clone()).ok();
+            let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+            let data = conn.get_object_data(&id).ok();
             let backend = conn.backend().downgrade();
             Ok(WlDisplay { id, data, version, backend })
         }
         #[inline]
         fn inert(backend: WeakBackend) -> Self {
-            WlDisplay { id: ObjectId::null(), data: None, version: 0, backend }
+            WlDisplay { id: ObjectId::null().clone(), data: None, version: 0, backend }
         }
         fn parse_event(
             conn: &Connection,
-            msg: Message<ObjectId, OwnedFd>,
+            msg: OwnedMessage<ObjectId>,
         ) -> Result<(Self, Self::Event), DispatchError> {
             let me = Self::from_id(conn, msg.sender_id.clone()).unwrap();
             let mut arg_iter = msg.args.into_iter();
             match msg.opcode {
                 0u16 => {
                     if let (
-                        Some(Argument::Object(object_id)),
-                        Some(Argument::Uint(code)),
-                        Some(Argument::Str(message)),
+                        Some(OwnedArgument::Object(object_id)),
+                        Some(OwnedArgument::Uint(code)),
+                        Some(OwnedArgument::Str(message)),
                     ) = (arg_iter.next(), arg_iter.next(), arg_iter.next())
                     {
                         Ok((
@@ -233,7 +233,7 @@ pub mod wl_display {
                     }
                 }
                 1u16 => {
-                    if let (Some(Argument::Uint(id))) = (arg_iter.next()) {
+                    if let (Some(OwnedArgument::Uint(id))) = (arg_iter.next()) {
                         Ok((me, Event::DeleteId { id }))
                     } else {
                         Err(DispatchError::BadMessage {
@@ -250,17 +250,11 @@ pub mod wl_display {
                 }),
             }
         }
-        fn write_request<'a>(
-            &self,
+        fn write_request<'r, 'a: 'r, 'b: 'r>(
+            &'a self,
             conn: &Connection,
-            msg: Self::Request<'a>,
-        ) -> Result<
-            (
-                Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>,
-                Option<(&'static Interface, u32)>,
-            ),
-            InvalidId,
-        > {
+            msg: Self::Request<'b>,
+        ) -> Result<(Message<'r, ObjectId>, Option<(&'static Interface, u32)>), InvalidId> {
             match msg {
                 Request::Sync {} => {
                     let child_spec = {
@@ -272,7 +266,7 @@ pub mod wl_display {
                         vec.push(Argument::NewId(ObjectId::null()));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 0u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 0u16, args }, child_spec))
                 }
                 Request::GetRegistry {} => {
                     let child_spec = {
@@ -284,7 +278,7 @@ pub mod wl_display {
                         vec.push(Argument::NewId(ObjectId::null()));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 1u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 1u16, args }, child_spec))
                 }
                 Request::__phantom_lifetime { never, .. } => match never {},
             }
@@ -331,7 +325,7 @@ pub mod wl_registry {
         Connection, Dispatch, DispatchError, Proxy, QueueHandle, QueueProxyData, Weak,
         backend::{
             Backend, InvalidId, ObjectData, ObjectId, WeakBackend,
-            protocol::{Argument, Interface, Message, same_interface},
+            protocol::{Argument, Interface, Message, OwnedArgument, OwnedMessage, same_interface},
             smallvec,
         },
     };
@@ -417,7 +411,7 @@ pub mod wl_registry {
     impl std::cmp::Eq for WlRegistry {}
     impl PartialEq<Weak<WlRegistry>> for WlRegistry {
         fn eq(&self, other: &Weak<WlRegistry>) -> bool {
-            self.id == other.id()
+            self.id == *other.id()
         }
     }
     impl std::borrow::Borrow<ObjectId> for WlRegistry {
@@ -438,8 +432,8 @@ pub mod wl_registry {
             &super::WL_REGISTRY_INTERFACE
         }
         #[inline]
-        fn id(&self) -> ObjectId {
-            self.id.clone()
+        fn id(&self) -> &ObjectId {
+            &self.id
         }
         #[inline]
         fn version(&self) -> u32 {
@@ -456,27 +450,27 @@ pub mod wl_registry {
             if !same_interface(id.interface(), Self::interface()) && !id.is_null() {
                 return Err(InvalidId);
             }
-            let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-            let data = conn.get_object_data(id.clone()).ok();
+            let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+            let data = conn.get_object_data(&id).ok();
             let backend = conn.backend().downgrade();
             Ok(WlRegistry { id, data, version, backend })
         }
         #[inline]
         fn inert(backend: WeakBackend) -> Self {
-            WlRegistry { id: ObjectId::null(), data: None, version: 0, backend }
+            WlRegistry { id: ObjectId::null().clone(), data: None, version: 0, backend }
         }
         fn parse_event(
             conn: &Connection,
-            msg: Message<ObjectId, OwnedFd>,
+            msg: OwnedMessage<ObjectId>,
         ) -> Result<(Self, Self::Event), DispatchError> {
             let me = Self::from_id(conn, msg.sender_id.clone()).unwrap();
             let mut arg_iter = msg.args.into_iter();
             match msg.opcode {
                 0u16 => {
                     if let (
-                        Some(Argument::Uint(name)),
-                        Some(Argument::Str(interface)),
-                        Some(Argument::Uint(version)),
+                        Some(OwnedArgument::Uint(name)),
+                        Some(OwnedArgument::Str(interface)),
+                        Some(OwnedArgument::Uint(version)),
                     ) = (arg_iter.next(), arg_iter.next(), arg_iter.next())
                     {
                         Ok((
@@ -499,7 +493,7 @@ pub mod wl_registry {
                     }
                 }
                 1u16 => {
-                    if let (Some(Argument::Uint(name))) = (arg_iter.next()) {
+                    if let (Some(OwnedArgument::Uint(name))) = (arg_iter.next()) {
                         Ok((me, Event::GlobalRemove { name }))
                     } else {
                         Err(DispatchError::BadMessage {
@@ -516,17 +510,11 @@ pub mod wl_registry {
                 }),
             }
         }
-        fn write_request<'a>(
-            &self,
+        fn write_request<'r, 'a: 'r, 'b: 'r>(
+            &'a self,
             conn: &Connection,
-            msg: Self::Request<'a>,
-        ) -> Result<
-            (
-                Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>,
-                Option<(&'static Interface, u32)>,
-            ),
-            InvalidId,
-        > {
+            msg: Self::Request<'b>,
+        ) -> Result<(Message<'r, ObjectId>, Option<(&'static Interface, u32)>), InvalidId> {
             match msg {
                 Request::Bind { name, id } => {
                     let child_spec = Some((id.0, id.1));
@@ -540,7 +528,7 @@ pub mod wl_registry {
                         vec.push(Argument::NewId(ObjectId::null()));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 0u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 0u16, args }, child_spec))
                 }
                 Request::__phantom_lifetime { never, .. } => match never {},
             }
@@ -573,7 +561,7 @@ pub mod wl_callback {
         Connection, Dispatch, DispatchError, Proxy, QueueHandle, QueueProxyData, Weak,
         backend::{
             Backend, InvalidId, ObjectData, ObjectId, WeakBackend,
-            protocol::{Argument, Interface, Message, same_interface},
+            protocol::{Argument, Interface, Message, OwnedArgument, OwnedMessage, same_interface},
             smallvec,
         },
     };
@@ -633,7 +621,7 @@ pub mod wl_callback {
     impl std::cmp::Eq for WlCallback {}
     impl PartialEq<Weak<WlCallback>> for WlCallback {
         fn eq(&self, other: &Weak<WlCallback>) -> bool {
-            self.id == other.id()
+            self.id == *other.id()
         }
     }
     impl std::borrow::Borrow<ObjectId> for WlCallback {
@@ -654,8 +642,8 @@ pub mod wl_callback {
             &super::WL_CALLBACK_INTERFACE
         }
         #[inline]
-        fn id(&self) -> ObjectId {
-            self.id.clone()
+        fn id(&self) -> &ObjectId {
+            &self.id
         }
         #[inline]
         fn version(&self) -> u32 {
@@ -672,24 +660,24 @@ pub mod wl_callback {
             if !same_interface(id.interface(), Self::interface()) && !id.is_null() {
                 return Err(InvalidId);
             }
-            let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-            let data = conn.get_object_data(id.clone()).ok();
+            let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+            let data = conn.get_object_data(&id).ok();
             let backend = conn.backend().downgrade();
             Ok(WlCallback { id, data, version, backend })
         }
         #[inline]
         fn inert(backend: WeakBackend) -> Self {
-            WlCallback { id: ObjectId::null(), data: None, version: 0, backend }
+            WlCallback { id: ObjectId::null().clone(), data: None, version: 0, backend }
         }
         fn parse_event(
             conn: &Connection,
-            msg: Message<ObjectId, OwnedFd>,
+            msg: OwnedMessage<ObjectId>,
         ) -> Result<(Self, Self::Event), DispatchError> {
             let me = Self::from_id(conn, msg.sender_id.clone()).unwrap();
             let mut arg_iter = msg.args.into_iter();
             match msg.opcode {
                 0u16 => {
-                    if let (Some(Argument::Uint(callback_data))) = (arg_iter.next()) {
+                    if let (Some(OwnedArgument::Uint(callback_data))) = (arg_iter.next()) {
                         Ok((me, Event::Done { callback_data }))
                     } else {
                         Err(DispatchError::BadMessage {
@@ -706,17 +694,11 @@ pub mod wl_callback {
                 }),
             }
         }
-        fn write_request<'a>(
-            &self,
+        fn write_request<'r, 'a: 'r, 'b: 'r>(
+            &'a self,
             conn: &Connection,
-            msg: Self::Request<'a>,
-        ) -> Result<
-            (
-                Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>,
-                Option<(&'static Interface, u32)>,
-            ),
-            InvalidId,
-        > {
+            msg: Self::Request<'b>,
+        ) -> Result<(Message<'r, ObjectId>, Option<(&'static Interface, u32)>), InvalidId> {
             match msg {
                 Request::__phantom_lifetime { never, .. } => match never {},
             }
@@ -729,7 +711,7 @@ pub mod test_global {
         Connection, Dispatch, DispatchError, Proxy, QueueHandle, QueueProxyData, Weak,
         backend::{
             Backend, InvalidId, ObjectData, ObjectId, WeakBackend,
-            protocol::{Argument, Interface, Message, same_interface},
+            protocol::{Argument, Interface, Message, OwnedArgument, OwnedMessage, same_interface},
             smallvec,
         },
     };
@@ -787,7 +769,7 @@ pub mod test_global {
             #[doc = "a fixed point number"]
             fixed_point: f64,
             #[doc = "an array"]
-            number_array: Vec<u8>,
+            number_array: &'a [u8],
             #[doc = "some text"]
             some_text: String,
             #[doc = "a file descriptor"]
@@ -798,15 +780,22 @@ pub mod test_global {
         #[doc = "Only available since version 3 of the interface"]
         GetTertiary {},
         #[doc = "link a secondary and a tertiary\n\n\n\nOnly available since version 3 of the interface"]
-        Link { sec: super::secondary::Secondary, ter: Option<super::tertiary::Tertiary>, time: u32 },
+        Link {
+            sec: &'a super::secondary::Secondary,
+            ter: Option<&'a super::tertiary::Tertiary>,
+            time: u32,
+        },
         #[doc = "This is a destructor, once sent this object cannot be used any longer.\nOnly available since version 4 of the interface"]
         Destroy,
         #[doc = "reverse link a secondary and a tertiary\n\n\n\nOnly available since version 5 of the interface"]
-        ReverseLink { sec: Option<super::secondary::Secondary>, ter: super::tertiary::Tertiary },
+        ReverseLink {
+            sec: Option<&'a super::secondary::Secondary>,
+            ter: &'a super::tertiary::Tertiary,
+        },
         #[doc = "a newid request that also takes allow null arg\n\n\n\nOnly available since version 5 of the interface"]
         NewidAndAllowNull {
-            sec: Option<super::secondary::Secondary>,
-            ter: super::tertiary::Tertiary,
+            sec: Option<&'a super::secondary::Secondary>,
+            ter: &'a super::tertiary::Tertiary,
         },
         #[doc(hidden)]
         __phantom_lifetime {
@@ -878,7 +867,7 @@ pub mod test_global {
     impl std::cmp::Eq for TestGlobal {}
     impl PartialEq<Weak<TestGlobal>> for TestGlobal {
         fn eq(&self, other: &Weak<TestGlobal>) -> bool {
-            self.id == other.id()
+            self.id == *other.id()
         }
     }
     impl std::borrow::Borrow<ObjectId> for TestGlobal {
@@ -899,8 +888,8 @@ pub mod test_global {
             &super::TEST_GLOBAL_INTERFACE
         }
         #[inline]
-        fn id(&self) -> ObjectId {
-            self.id.clone()
+        fn id(&self) -> &ObjectId {
+            &self.id
         }
         #[inline]
         fn version(&self) -> u32 {
@@ -917,30 +906,30 @@ pub mod test_global {
             if !same_interface(id.interface(), Self::interface()) && !id.is_null() {
                 return Err(InvalidId);
             }
-            let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-            let data = conn.get_object_data(id.clone()).ok();
+            let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+            let data = conn.get_object_data(&id).ok();
             let backend = conn.backend().downgrade();
             Ok(TestGlobal { id, data, version, backend })
         }
         #[inline]
         fn inert(backend: WeakBackend) -> Self {
-            TestGlobal { id: ObjectId::null(), data: None, version: 0, backend }
+            TestGlobal { id: ObjectId::null().clone(), data: None, version: 0, backend }
         }
         fn parse_event(
             conn: &Connection,
-            msg: Message<ObjectId, OwnedFd>,
+            msg: OwnedMessage<ObjectId>,
         ) -> Result<(Self, Self::Event), DispatchError> {
             let me = Self::from_id(conn, msg.sender_id.clone()).unwrap();
             let mut arg_iter = msg.args.into_iter();
             match msg.opcode {
                 0u16 => {
                     if let (
-                        Some(Argument::Uint(unsigned_int)),
-                        Some(Argument::Int(signed_int)),
-                        Some(Argument::Fixed(fixed_point)),
-                        Some(Argument::Array(number_array)),
-                        Some(Argument::Str(some_text)),
-                        Some(Argument::Fd(file_descriptor)),
+                        Some(OwnedArgument::Uint(unsigned_int)),
+                        Some(OwnedArgument::Int(signed_int)),
+                        Some(OwnedArgument::Fixed(fixed_point)),
+                        Some(OwnedArgument::Array(number_array)),
+                        Some(OwnedArgument::Str(some_text)),
+                        Some(OwnedArgument::Fd(file_descriptor)),
                     ) = (
                         arg_iter.next(),
                         arg_iter.next(),
@@ -972,7 +961,7 @@ pub mod test_global {
                     }
                 }
                 1u16 => {
-                    if let (Some(Argument::Object(sec))) = (arg_iter.next()) {
+                    if let (Some(OwnedArgument::Object(sec))) = (arg_iter.next()) {
                         Ok((
                             me,
                             Event::AckSecondary {
@@ -1000,8 +989,10 @@ pub mod test_global {
                     }
                 }
                 2u16 => {
-                    if let (Some(Argument::NewId(new_quad)), Some(Argument::Object(old_quad))) =
-                        (arg_iter.next(), arg_iter.next())
+                    if let (
+                        Some(OwnedArgument::NewId(new_quad)),
+                        Some(OwnedArgument::Object(old_quad)),
+                    ) = (arg_iter.next(), arg_iter.next())
                     {
                         Ok((
                             me,
@@ -1055,17 +1046,11 @@ pub mod test_global {
                 }),
             }
         }
-        fn write_request<'a>(
-            &self,
+        fn write_request<'r, 'a: 'r, 'b: 'r>(
+            &'a self,
             conn: &Connection,
-            msg: Self::Request<'a>,
-        ) -> Result<
-            (
-                Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>,
-                Option<(&'static Interface, u32)>,
-            ),
-            InvalidId,
-        > {
+            msg: Self::Request<'b>,
+        ) -> Result<(Message<'r, ObjectId>, Option<(&'static Interface, u32)>), InvalidId> {
             match msg {
                 Request::ManyArgs {
                     unsigned_int,
@@ -1084,7 +1069,7 @@ pub mod test_global {
                         Argument::Str(Some(Box::new(std::ffi::CString::new(some_text).unwrap()))),
                         Argument::Fd(file_descriptor),
                     ]);
-                    Ok((Message { sender_id: self.id.clone(), opcode: 0u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 0u16, args }, child_spec))
                 }
                 Request::GetSecondary {} => {
                     let child_spec = {
@@ -1096,7 +1081,7 @@ pub mod test_global {
                         vec.push(Argument::NewId(ObjectId::null()));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 1u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 1u16, args }, child_spec))
                 }
                 Request::GetTertiary {} => {
                     let child_spec = {
@@ -1108,41 +1093,41 @@ pub mod test_global {
                         vec.push(Argument::NewId(ObjectId::null()));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 2u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 2u16, args }, child_spec))
                 }
                 Request::Link { sec, ter, time } => {
                     let child_spec = None;
                     let args = {
                         let mut vec = smallvec::SmallVec::new();
-                        vec.push(Argument::Object(Proxy::id(&sec)));
+                        vec.push(Argument::Object(Proxy::id(sec)));
                         vec.push(if let Some(obj) = ter {
-                            Argument::Object(Proxy::id(&obj))
+                            Argument::Object(Proxy::id(obj))
                         } else {
                             Argument::Object(ObjectId::null())
                         });
                         vec.push(Argument::Uint(time));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 3u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 3u16, args }, child_spec))
                 }
                 Request::Destroy {} => {
                     let child_spec = None;
                     let args = smallvec::SmallVec::new();
-                    Ok((Message { sender_id: self.id.clone(), opcode: 4u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 4u16, args }, child_spec))
                 }
                 Request::ReverseLink { sec, ter } => {
                     let child_spec = None;
                     let args = {
                         let mut vec = smallvec::SmallVec::new();
                         vec.push(if let Some(obj) = sec {
-                            Argument::Object(Proxy::id(&obj))
+                            Argument::Object(Proxy::id(obj))
                         } else {
                             Argument::Object(ObjectId::null())
                         });
-                        vec.push(Argument::Object(Proxy::id(&ter)));
+                        vec.push(Argument::Object(Proxy::id(ter)));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 5u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 5u16, args }, child_spec))
                 }
                 Request::NewidAndAllowNull { sec, ter } => {
                     let child_spec = {
@@ -1153,14 +1138,14 @@ pub mod test_global {
                         let mut vec = smallvec::SmallVec::new();
                         vec.push(Argument::NewId(ObjectId::null()));
                         vec.push(if let Some(obj) = sec {
-                            Argument::Object(Proxy::id(&obj))
+                            Argument::Object(Proxy::id(obj))
                         } else {
                             Argument::Object(ObjectId::null())
                         });
-                        vec.push(Argument::Object(Proxy::id(&ter)));
+                        vec.push(Argument::Object(Proxy::id(ter)));
                         vec
                     };
-                    Ok((Message { sender_id: self.id.clone(), opcode: 6u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 6u16, args }, child_spec))
                 }
                 Request::__phantom_lifetime { never, .. } => match never {},
             }
@@ -1174,7 +1159,7 @@ pub mod test_global {
             unsigned_int: u32,
             signed_int: i32,
             fixed_point: f64,
-            number_array: Vec<u8>,
+            number_array: &[u8],
             some_text: String,
             file_descriptor: ::std::os::unix::io::BorrowedFd<'_>,
         ) {
@@ -1239,11 +1224,7 @@ pub mod test_global {
                 None => return,
             };
             let conn = Connection::from_backend(backend);
-            let _ = conn.send_request(
-                self,
-                Request::Link { sec: sec.clone(), ter: ter.cloned(), time },
-                None,
-            );
+            let _ = conn.send_request(self, Request::Link { sec, ter, time }, None);
         }
         #[allow(clippy::too_many_arguments)]
         pub fn destroy(&self) {
@@ -1266,11 +1247,7 @@ pub mod test_global {
                 None => return,
             };
             let conn = Connection::from_backend(backend);
-            let _ = conn.send_request(
-                self,
-                Request::ReverseLink { sec: sec.cloned(), ter: ter.clone() },
-                None,
-            );
+            let _ = conn.send_request(self, Request::ReverseLink { sec, ter }, None);
         }
         #[doc = "a newid request that also takes allow null arg"]
         #[allow(clippy::too_many_arguments)]
@@ -1285,7 +1262,7 @@ pub mod test_global {
             U: Dispatch<super::quad::Quad, D> + Send + Sync + 'static,
         {
             self.send_constructor(
-                Request::NewidAndAllowNull { sec: sec.cloned(), ter: ter.clone() },
+                Request::NewidAndAllowNull { sec, ter },
                 qh.make_data::<super::quad::Quad, U>(udata),
             )
             .unwrap_or_else(|_| Proxy::inert(self.backend.clone()))
@@ -1297,7 +1274,7 @@ pub mod secondary {
         Connection, Dispatch, DispatchError, Proxy, QueueHandle, QueueProxyData, Weak,
         backend::{
             Backend, InvalidId, ObjectData, ObjectId, WeakBackend,
-            protocol::{Argument, Interface, Message, same_interface},
+            protocol::{Argument, Interface, Message, OwnedArgument, OwnedMessage, same_interface},
             smallvec,
         },
     };
@@ -1352,7 +1329,7 @@ pub mod secondary {
     impl std::cmp::Eq for Secondary {}
     impl PartialEq<Weak<Secondary>> for Secondary {
         fn eq(&self, other: &Weak<Secondary>) -> bool {
-            self.id == other.id()
+            self.id == *other.id()
         }
     }
     impl std::borrow::Borrow<ObjectId> for Secondary {
@@ -1373,8 +1350,8 @@ pub mod secondary {
             &super::SECONDARY_INTERFACE
         }
         #[inline]
-        fn id(&self) -> ObjectId {
-            self.id.clone()
+        fn id(&self) -> &ObjectId {
+            &self.id
         }
         #[inline]
         fn version(&self) -> u32 {
@@ -1391,18 +1368,18 @@ pub mod secondary {
             if !same_interface(id.interface(), Self::interface()) && !id.is_null() {
                 return Err(InvalidId);
             }
-            let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-            let data = conn.get_object_data(id.clone()).ok();
+            let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+            let data = conn.get_object_data(&id).ok();
             let backend = conn.backend().downgrade();
             Ok(Secondary { id, data, version, backend })
         }
         #[inline]
         fn inert(backend: WeakBackend) -> Self {
-            Secondary { id: ObjectId::null(), data: None, version: 0, backend }
+            Secondary { id: ObjectId::null().clone(), data: None, version: 0, backend }
         }
         fn parse_event(
             conn: &Connection,
-            msg: Message<ObjectId, OwnedFd>,
+            msg: OwnedMessage<ObjectId>,
         ) -> Result<(Self, Self::Event), DispatchError> {
             let me = Self::from_id(conn, msg.sender_id.clone()).unwrap();
             let mut arg_iter = msg.args.into_iter();
@@ -1414,22 +1391,16 @@ pub mod secondary {
                 }),
             }
         }
-        fn write_request<'a>(
-            &self,
+        fn write_request<'r, 'a: 'r, 'b: 'r>(
+            &'a self,
             conn: &Connection,
-            msg: Self::Request<'a>,
-        ) -> Result<
-            (
-                Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>,
-                Option<(&'static Interface, u32)>,
-            ),
-            InvalidId,
-        > {
+            msg: Self::Request<'b>,
+        ) -> Result<(Message<'r, ObjectId>, Option<(&'static Interface, u32)>), InvalidId> {
             match msg {
                 Request::Destroy {} => {
                     let child_spec = None;
                     let args = smallvec::SmallVec::new();
-                    Ok((Message { sender_id: self.id.clone(), opcode: 0u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 0u16, args }, child_spec))
                 }
                 Request::__phantom_lifetime { never, .. } => match never {},
             }
@@ -1452,7 +1423,7 @@ pub mod tertiary {
         Connection, Dispatch, DispatchError, Proxy, QueueHandle, QueueProxyData, Weak,
         backend::{
             Backend, InvalidId, ObjectData, ObjectId, WeakBackend,
-            protocol::{Argument, Interface, Message, same_interface},
+            protocol::{Argument, Interface, Message, OwnedArgument, OwnedMessage, same_interface},
             smallvec,
         },
     };
@@ -1507,7 +1478,7 @@ pub mod tertiary {
     impl std::cmp::Eq for Tertiary {}
     impl PartialEq<Weak<Tertiary>> for Tertiary {
         fn eq(&self, other: &Weak<Tertiary>) -> bool {
-            self.id == other.id()
+            self.id == *other.id()
         }
     }
     impl std::borrow::Borrow<ObjectId> for Tertiary {
@@ -1528,8 +1499,8 @@ pub mod tertiary {
             &super::TERTIARY_INTERFACE
         }
         #[inline]
-        fn id(&self) -> ObjectId {
-            self.id.clone()
+        fn id(&self) -> &ObjectId {
+            &self.id
         }
         #[inline]
         fn version(&self) -> u32 {
@@ -1546,18 +1517,18 @@ pub mod tertiary {
             if !same_interface(id.interface(), Self::interface()) && !id.is_null() {
                 return Err(InvalidId);
             }
-            let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-            let data = conn.get_object_data(id.clone()).ok();
+            let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+            let data = conn.get_object_data(&id).ok();
             let backend = conn.backend().downgrade();
             Ok(Tertiary { id, data, version, backend })
         }
         #[inline]
         fn inert(backend: WeakBackend) -> Self {
-            Tertiary { id: ObjectId::null(), data: None, version: 0, backend }
+            Tertiary { id: ObjectId::null().clone(), data: None, version: 0, backend }
         }
         fn parse_event(
             conn: &Connection,
-            msg: Message<ObjectId, OwnedFd>,
+            msg: OwnedMessage<ObjectId>,
         ) -> Result<(Self, Self::Event), DispatchError> {
             let me = Self::from_id(conn, msg.sender_id.clone()).unwrap();
             let mut arg_iter = msg.args.into_iter();
@@ -1569,22 +1540,16 @@ pub mod tertiary {
                 }),
             }
         }
-        fn write_request<'a>(
-            &self,
+        fn write_request<'r, 'a: 'r, 'b: 'r>(
+            &'a self,
             conn: &Connection,
-            msg: Self::Request<'a>,
-        ) -> Result<
-            (
-                Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>,
-                Option<(&'static Interface, u32)>,
-            ),
-            InvalidId,
-        > {
+            msg: Self::Request<'b>,
+        ) -> Result<(Message<'r, ObjectId>, Option<(&'static Interface, u32)>), InvalidId> {
             match msg {
                 Request::Destroy {} => {
                     let child_spec = None;
                     let args = smallvec::SmallVec::new();
-                    Ok((Message { sender_id: self.id.clone(), opcode: 0u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 0u16, args }, child_spec))
                 }
                 Request::__phantom_lifetime { never, .. } => match never {},
             }
@@ -1607,7 +1572,7 @@ pub mod quad {
         Connection, Dispatch, DispatchError, Proxy, QueueHandle, QueueProxyData, Weak,
         backend::{
             Backend, InvalidId, ObjectData, ObjectId, WeakBackend,
-            protocol::{Argument, Interface, Message, same_interface},
+            protocol::{Argument, Interface, Message, OwnedArgument, OwnedMessage, same_interface},
             smallvec,
         },
     };
@@ -1662,7 +1627,7 @@ pub mod quad {
     impl std::cmp::Eq for Quad {}
     impl PartialEq<Weak<Quad>> for Quad {
         fn eq(&self, other: &Weak<Quad>) -> bool {
-            self.id == other.id()
+            self.id == *other.id()
         }
     }
     impl std::borrow::Borrow<ObjectId> for Quad {
@@ -1683,8 +1648,8 @@ pub mod quad {
             &super::QUAD_INTERFACE
         }
         #[inline]
-        fn id(&self) -> ObjectId {
-            self.id.clone()
+        fn id(&self) -> &ObjectId {
+            &self.id
         }
         #[inline]
         fn version(&self) -> u32 {
@@ -1701,18 +1666,18 @@ pub mod quad {
             if !same_interface(id.interface(), Self::interface()) && !id.is_null() {
                 return Err(InvalidId);
             }
-            let version = conn.object_info(id.clone()).map(|info| info.version).unwrap_or(0);
-            let data = conn.get_object_data(id.clone()).ok();
+            let version = conn.object_info(&id).map(|info| info.version).unwrap_or(0);
+            let data = conn.get_object_data(&id).ok();
             let backend = conn.backend().downgrade();
             Ok(Quad { id, data, version, backend })
         }
         #[inline]
         fn inert(backend: WeakBackend) -> Self {
-            Quad { id: ObjectId::null(), data: None, version: 0, backend }
+            Quad { id: ObjectId::null().clone(), data: None, version: 0, backend }
         }
         fn parse_event(
             conn: &Connection,
-            msg: Message<ObjectId, OwnedFd>,
+            msg: OwnedMessage<ObjectId>,
         ) -> Result<(Self, Self::Event), DispatchError> {
             let me = Self::from_id(conn, msg.sender_id.clone()).unwrap();
             let mut arg_iter = msg.args.into_iter();
@@ -1724,22 +1689,16 @@ pub mod quad {
                 }),
             }
         }
-        fn write_request<'a>(
-            &self,
+        fn write_request<'r, 'a: 'r, 'b: 'r>(
+            &'a self,
             conn: &Connection,
-            msg: Self::Request<'a>,
-        ) -> Result<
-            (
-                Message<ObjectId, std::os::unix::io::BorrowedFd<'a>>,
-                Option<(&'static Interface, u32)>,
-            ),
-            InvalidId,
-        > {
+            msg: Self::Request<'b>,
+        ) -> Result<(Message<'r, ObjectId>, Option<(&'static Interface, u32)>), InvalidId> {
             match msg {
                 Request::Destroy {} => {
                     let child_spec = None;
                     let args = smallvec::SmallVec::new();
-                    Ok((Message { sender_id: self.id.clone(), opcode: 0u16, args }, child_spec))
+                    Ok((Message { sender_id: &self.id, opcode: 0u16, args }, child_spec))
                 }
                 Request::__phantom_lifetime { never, .. } => match never {},
             }

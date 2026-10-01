@@ -7,7 +7,7 @@ use std::{io::Write, os::unix::io::AsFd};
 use tokio::io::unix::AsyncFd;
 use wayland_client::{
     Connection, Dispatch, NoopIgnore, QueueHandle,
-    globals::{GlobalListHandler, registry_queue_init},
+    globals::{GlobalList, GlobalListHandler},
     protocol::{wl_buffer, wl_compositor, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 
@@ -17,10 +17,11 @@ struct GlobalData;
 
 #[tokio::main]
 async fn main() {
-    let conn = Connection::connect_to_env().unwrap();
+    let conn = unsafe { Connection::connect_to_env() }.unwrap();
 
-    let (globals, event_queue) = registry_queue_init(&conn).unwrap();
+    let event_queue = conn.new_event_queue();
     let qh = event_queue.handle();
+    let globals = GlobalList::init(&conn, &qh).unwrap();
 
     let wm_base =
         globals.bind_singleton::<xdg_wm_base::XdgWmBase, _, _>(1..=1, &qh, GlobalData).unwrap();
@@ -33,13 +34,7 @@ async fn main() {
     let _xdg_toplevel = xdg_surface.get_toplevel(&qh, GlobalData);
     base_surface.commit();
 
-    for global in globals.contents().clone_list() {
-        if global.interface == "wl_seat" {
-            globals
-                .bind_specific::<wl_seat::WlSeat, _, _>(global.name, 1..=1, &qh, GlobalData)
-                .unwrap();
-        }
-    }
+    globals.bind_all::<wl_seat::WlSeat, _, _>(1..=1, &qh, |_| GlobalData).unwrap();
 
     let shm = globals.bind_singleton::<wl_shm::WlShm, _, _>(1..=1, &qh, NoopIgnore).unwrap();
 

@@ -5,8 +5,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::protocol::Message;
-
 use super::*;
 
 struct ServerData(AtomicBool);
@@ -18,17 +16,17 @@ macro_rules! serverdata_impls {
                 self: Arc<Self>,
                 _: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                msg: Message<$server_backend::ObjectId, OwnedFd>,
+                _: &$server_backend::ClientId,
+                msg: OwnedMessage<$server_backend::ObjectId>,
             ) -> Option<Arc<dyn $server_backend::ObjectData<()>>> {
                 assert_eq!(msg.opcode, 0);
                 if let [
-                    Argument::Uint(u),
-                    Argument::Int(i),
-                    Argument::Fixed(f),
-                    Argument::Array(a),
-                    Argument::Str(Some(s)),
-                    Argument::Fd(fd),
+                    OwnedArgument::Uint(u),
+                    OwnedArgument::Int(i),
+                    OwnedArgument::Fixed(f),
+                    OwnedArgument::Array(a),
+                    OwnedArgument::Str(Some(s)),
+                    OwnedArgument::Fd(fd),
                 ] = &msg.args[..]
                 {
                     assert_eq!(*u, 42);
@@ -52,8 +50,8 @@ macro_rules! serverdata_impls {
                 self: Arc<Self>,
                 _: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                _: $server_backend::ObjectId,
+                _: &$server_backend::ClientId,
+                _: &$server_backend::ObjectId,
             ) {
             }
         }
@@ -63,20 +61,20 @@ macro_rules! serverdata_impls {
                 self: Arc<Self>,
                 handle: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                _: $server_backend::GlobalId,
-                object_id: $server_backend::ObjectId,
+                _: &$server_backend::ClientId,
+                _: &$server_backend::GlobalId,
+                object_id: &$server_backend::ObjectId,
             ) -> Arc<dyn $server_backend::ObjectData<()>> {
                 let stdout = io::stdout().lock();
                 handle
                     .send_event(message!(
-                        object_id,
+                        &object_id,
                         0,
                         [
                             Argument::Uint(1337),
                             Argument::Int(-53),
                             Argument::Fixed(9823),
-                            Argument::Array(Box::new(vec![10, 20, 30, 40, 50, 60, 70, 80, 90])),
+                            Argument::Array(Box::new(&[10, 20, 30, 40, 50, 60, 70, 80, 90])),
                             Argument::Str(Some(Box::new(
                                 CString::new("I want cake".as_bytes()).unwrap()
                             ))),
@@ -101,16 +99,16 @@ macro_rules! clientdata_impls {
             fn event(
                 self: Arc<Self>,
                 _handle: &$client_backend::Backend,
-                msg: Message<$client_backend::ObjectId, OwnedFd>,
+                msg: OwnedMessage<$client_backend::ObjectId>,
             ) -> Option<Arc<dyn $client_backend::ObjectData>> {
                 assert_eq!(msg.opcode, 0);
                 if let [
-                    Argument::Uint(u),
-                    Argument::Int(i),
-                    Argument::Fixed(f),
-                    Argument::Array(a),
-                    Argument::Str(Some(s)),
-                    Argument::Fd(fd),
+                    OwnedArgument::Uint(u),
+                    OwnedArgument::Int(i),
+                    OwnedArgument::Fixed(f),
+                    OwnedArgument::Array(a),
+                    OwnedArgument::Str(Some(s)),
+                    OwnedArgument::Fd(fd),
                 ] = &msg.args[..]
                 {
                     assert_eq!(*u, 1337);
@@ -129,7 +127,7 @@ macro_rules! clientdata_impls {
                 self.0.store(true, Ordering::SeqCst);
                 None
             }
-            fn destroyed(&self, _object_id: $client_backend::ObjectId) {}
+            fn destroyed(&self, _object_id: &$client_backend::ObjectId) {}
         }
     };
 }
@@ -154,7 +152,7 @@ expand_test!(many_args, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -163,7 +161,7 @@ expand_test!(many_args, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -190,13 +188,13 @@ expand_test!(many_args, {
     client
         .send_request(
             message!(
-                test_global_id,
+                &test_global_id,
                 0,
                 [
                     Argument::Uint(42),
                     Argument::Int(-13),
                     Argument::Fixed(4589),
-                    Argument::Array(Box::new(vec![1, 2, 3, 4, 5, 6, 7, 8, 9])),
+                    Argument::Array(Box::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9])),
                     Argument::Str(Some(Box::new(
                         CString::new("I like trains".as_bytes()).unwrap()
                     ))),

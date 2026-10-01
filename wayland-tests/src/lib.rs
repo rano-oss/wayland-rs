@@ -6,7 +6,6 @@
 pub use wayland_client as wayc;
 pub use wayland_server as ways;
 
-use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +61,8 @@ impl<D> TestClient<D> {
     }
 
     pub fn new_from_env() -> TestClient<D> {
-        let conn = self::wayc::Connection::connect_to_env().expect("Failed to connect to server.");
+        let conn = unsafe { self::wayc::Connection::connect_to_env() }
+            .expect("Failed to connect to server.");
         let event_queue = conn.new_event_queue();
         let display = conn.display();
         TestClient { conn, display, event_queue }
@@ -115,20 +115,20 @@ impl wayc::backend::ObjectData for SyncData {
     fn event(
         self: Arc<Self>,
         _backend: &wayc::backend::Backend,
-        _msg: self::wayc::backend::protocol::Message<wayc::backend::ObjectId, OwnedFd>,
+        _msg: self::wayc::backend::protocol::OwnedMessage<wayc::backend::ObjectId>,
     ) -> Option<Arc<dyn ObjectData>> {
         self.done.store(true, Ordering::Release);
         None
     }
 
-    fn destroyed(&self, _: wayc::backend::ObjectId) {}
+    fn destroyed(&self, _: &wayc::backend::ObjectId) {}
 }
 
 pub struct DumbClientData;
 
 impl ways::backend::ClientData for DumbClientData {
-    fn initialized(&self, _: ways::backend::ClientId) {}
-    fn disconnected(&self, _: ways::backend::ClientId, _: ways::backend::DisconnectReason) {}
+    fn initialized(&self, _: &ways::backend::ClientId) {}
+    fn disconnected(&self, _: &ways::backend::ClientId, _: ways::backend::DisconnectReason) {}
 }
 
 #[macro_export]

@@ -1,7 +1,7 @@
 use std::{
     ffi::CString,
     os::unix::{
-        io::{AsFd, BorrowedFd, OwnedFd},
+        io::{AsFd, BorrowedFd},
         net::UnixStream,
     },
     sync::Arc,
@@ -11,8 +11,8 @@ use crate::{
     core_interfaces::{WL_CALLBACK_INTERFACE, WL_DISPLAY_INTERFACE, WL_REGISTRY_INTERFACE},
     debug,
     protocol::{
-        ANONYMOUS_INTERFACE, AllowNull, Argument, ArgumentType, INLINE_ARGS, Interface, Message,
-        ObjectInfo, ProtocolError, check_for_signature, same_interface,
+        AllowNull, Argument, ArgumentType, INLINE_ARGS, Interface, Message, ObjectInfo,
+        OwnedArgument, OwnedMessage, ProtocolError, check_for_signature, same_interface,
         same_interface_or_anonymous,
     },
     rs::map::SERVER_ID_LIMIT,
@@ -33,7 +33,7 @@ use super::{
     handle::PendingDestructor, registry::Registry,
 };
 
-type ArgSmallVec<Fd> = SmallVec<[Argument<ObjectId, Fd>; INLINE_ARGS]>;
+type OwnedArgSmallVec = SmallVec<[OwnedArgument<ObjectId>; INLINE_ARGS]>;
 
 #[repr(u32)]
 #[allow(dead_code)]
@@ -82,7 +82,7 @@ impl<D> Client<D> {
         )
         .unwrap();
 
-        data.initialized(ClientId { id: id.clone() });
+        data.initialized(&ClientId { id });
 
         Self { socket, map, debug, id, killed: false, last_serial: 0, data }
     }
@@ -99,34 +99,34 @@ impl<D> Client<D> {
             version,
             data: Data { serial, user_data },
         });
-        InnerObjectId { id, serial, client_id: self.id.clone(), interface }
+        InnerObjectId { id, serial, client_id: self.id, interface }
     }
 
     pub(crate) fn destroy_object(
         &mut self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
         pending_destructors: &mut Vec<super::handle::PendingDestructor<D>>,
     ) -> Result<(), InvalidId> {
-        let object = self.get_object(id.clone())?;
-        pending_destructors.push((object.data.user_data.clone(), self.id.clone(), id.clone()));
-        self.send_delete_id(id.clone());
+        let object = self.get_object(id)?;
+        pending_destructors.push((object.data.user_data.clone(), self.id, *id));
+        self.send_delete_id(*id);
         Ok(())
     }
 
-    pub(crate) fn object_info(&self, id: InnerObjectId) -> Result<ObjectInfo, InvalidId> {
-        let object = self.get_object(id.clone())?;
+    pub(crate) fn object_info(&self, id: &InnerObjectId) -> Result<ObjectInfo, InvalidId> {
+        let object = self.get_object(id)?;
         Ok(ObjectInfo { id: id.id, interface: object.interface, version: object.version })
     }
 
     pub(crate) fn send_event(
         &mut self,
-        Message { sender_id: object_id, opcode, args }: Message<ObjectId, BorrowedFd>,
+        Message { sender_id: object_id, opcode, args }: Message<ObjectId>,
         pending_destructors: Option<&mut Vec<super::handle::PendingDestructor<D>>>,
     ) -> Result<(), InvalidId> {
         if self.killed {
             return Ok(());
         }
-        let object = self.get_object(object_id.id.clone())?;
+        let object = self.get_object(&object_id.id)?;
 
         let message_desc = match object.interface.events.get(opcode as usize) {
             Some(msg) => msg,
@@ -159,22 +159,22 @@ impl<D> Client<D> {
             );
         }
 
-        let mut msg_args = SmallVec::with_capacity(args.len());
+        let mut msg_args = SmallVec::<[_; INLINE_ARGS]>::with_capacity(args.len());
         let mut arg_interfaces = message_desc.arg_interfaces.iter();
-        for (i, arg) in args.into_iter().enumerate() {
+        for (i, arg) in args.iter().enumerate() {
             msg_args.push(match arg {
-                Argument::Array(a) => Argument::Array(a),
-                Argument::Int(i) => Argument::Int(i),
-                Argument::Uint(u) => Argument::Uint(u),
-                Argument::Str(s) => Argument::Str(s),
-                Argument::Fixed(f) => Argument::Fixed(f),
-                Argument::Fd(f) => Argument::Fd(f),
+                Argument::Array(a) => Argument::Array(a.clone()),
+                Argument::Int(i) => Argument::Int(*i),
+                Argument::Uint(u) => Argument::Uint(*u),
+                Argument::Str(s) => Argument::Str(s.clone()),
+                Argument::Fixed(f) => Argument::Fixed(*f),
+                Argument::Fd(f) => Argument::Fd(*f),
                 Argument::NewId(o) => {
                     if o.id.id != 0 {
                         if o.id.client_id != self.id {
                             panic!("Attempting to send an event with objects from wrong client.")
                         }
-                        let object = self.get_object(o.id.clone())?;
+                        let object = self.get_object(&o.id)?;
                         let child_interface = match message_desc.child_interface {
                             Some(iface) => iface,
                             None => panic!("Trying to send event {}@{}.{} which creates an object without specifying its interface, this is unsupported.", object_id.id.interface.name, object_id.id, message_desc.name),
@@ -185,7 +185,7 @@ impl<D> Client<D> {
                     } else if !matches!(message_desc.signature[i], ArgumentType::NewId) {
                         panic!("Request {}@{}.{} expects an non-null newid argument.", object.interface.name, object_id.id, message_desc.name);
                     }
-                    Argument::Object(o.id.id)
+                    Argument::Object(&o.id.id)
                 },
                 Argument::Object(o) => {
                     let next_interface = arg_interfaces.next().unwrap();
@@ -193,19 +193,19 @@ impl<D> Client<D> {
                         if o.id.client_id != self.id {
                             panic!("Attempting to send an event with objects from wrong client.")
                         }
-                        let arg_object = self.get_object(o.id.clone())?;
+                        let arg_object = self.get_object(&o.id)?;
                         if !same_interface_or_anonymous(next_interface, arg_object.interface) {
                             panic!("Event {}@{}.{} expects an object argument of interface {} but {} was provided instead.", object.interface.name, object_id.id, message_desc.name, next_interface.name, arg_object.interface.name);
                         }
                     } else if !matches!(message_desc.signature[i], ArgumentType::Object(AllowNull::Yes)) {
                             panic!("Request {}@{}.{} expects an non-null object argument.", object.interface.name, object_id.id, message_desc.name);
                     }
-                    Argument::Object(o.id.id)
+                    Argument::Object(&o.id.id)
                 }
             });
         }
 
-        let msg = Message { sender_id: object_id.id.id, opcode, args: msg_args };
+        let msg = Message { sender_id: &object_id.id.id, opcode, args: msg_args };
 
         if self.socket.write_message(&msg).is_err() {
             self.kill(DisconnectReason::ConnectionClosed);
@@ -214,7 +214,7 @@ impl<D> Client<D> {
         // Handle destruction if relevant
         if message_desc.is_destructor {
             if let Some(vec) = pending_destructors {
-                vec.push((object.data.user_data.clone(), self.id.clone(), object_id.id.clone()));
+                vec.push((object.data.user_data.clone(), self.id, object_id.id));
             }
             self.send_delete_id(object_id.id);
         }
@@ -225,7 +225,7 @@ impl<D> Client<D> {
     pub(crate) fn send_delete_id(&mut self, object_id: InnerObjectId) {
         // We should only send delete_id for objects in the client ID space
         if object_id.id < SERVER_ID_LIMIT {
-            let msg = message!(1, 1, [Argument::Uint(object_id.id)]);
+            let msg = message!(&1, 1, [Argument::Uint(object_id.id)]);
             if self.socket.write_message(&msg).is_err() {
                 self.kill(DisconnectReason::ConnectionClosed);
             }
@@ -235,7 +235,7 @@ impl<D> Client<D> {
 
     pub(crate) fn get_object_data(
         &self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
     ) -> Result<Arc<dyn ObjectData<D>>, InvalidId> {
         let object = self.get_object(id)?;
         Ok(object.data.user_data)
@@ -243,7 +243,7 @@ impl<D> Client<D> {
 
     pub(crate) fn set_object_data(
         &mut self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
         data: Arc<dyn ObjectData<D>>,
     ) -> Result<(), InvalidId> {
         self.map
@@ -260,10 +260,10 @@ impl<D> Client<D> {
 
     pub(crate) fn post_display_error(&mut self, code: DisplayError, message: CString) {
         self.post_error(
-            InnerObjectId {
+            &InnerObjectId {
                 id: 1,
                 interface: &WL_DISPLAY_INTERFACE,
-                client_id: self.id.clone(),
+                client_id: self.id,
                 serial: 0,
             },
             code as u32,
@@ -273,25 +273,26 @@ impl<D> Client<D> {
 
     pub(crate) fn post_error(
         &mut self,
-        object_id: InnerObjectId,
+        object_id: &InnerObjectId,
         error_code: u32,
         message: CString,
     ) {
+        let object = ObjectId { id: *object_id };
         let converted_message = message.to_string_lossy().into();
         // errors are ignored, as the client will be killed anyway
         let _ = self.send_event(
             message!(
-                ObjectId {
+                &ObjectId {
                     id: InnerObjectId {
                         id: 1,
                         interface: &WL_DISPLAY_INTERFACE,
-                        client_id: self.id.clone(),
+                        client_id: self.id,
                         serial: 0
                     }
                 },
                 0, // wl_display.error
                 [
-                    Argument::Object(ObjectId { id: object_id.clone() }),
+                    Argument::Object(&object),
                     Argument::Uint(error_code),
                     Argument::Str(Some(Box::new(message))),
                 ],
@@ -324,7 +325,7 @@ impl<D> Client<D> {
 
     pub(crate) fn kill(&mut self, reason: DisconnectReason) {
         self.killed = true;
-        self.data.disconnected(ClientId { id: self.id.clone() }, reason);
+        self.data.disconnected(&ClientId { id: self.id }, reason);
     }
 
     pub(crate) fn flush(&mut self) -> std::io::Result<()> {
@@ -332,21 +333,14 @@ impl<D> Client<D> {
     }
 
     pub(crate) fn all_objects(&self) -> impl Iterator<Item = ObjectId> + '_ {
-        let client_id = self.id.clone();
+        let client_id = self.id;
         self.map.all_objects().map(move |(id, obj)| ObjectId {
-            id: InnerObjectId {
-                id,
-                client_id: client_id.clone(),
-                interface: obj.interface,
-                serial: obj.data.serial,
-            },
+            id: InnerObjectId { id, client_id, interface: obj.interface, serial: obj.data.serial },
         })
     }
 
     #[allow(clippy::type_complexity)]
-    pub(crate) fn next_request(
-        &mut self,
-    ) -> std::io::Result<(Message<u32, OwnedFd>, Object<Data<D>>)> {
+    pub(crate) fn next_request(&mut self) -> std::io::Result<(OwnedMessage<u32>, Object<Data<D>>)> {
         if self.killed {
             return Err(rustix::io::Errno::PIPE.into());
         }
@@ -389,7 +383,7 @@ impl<D> Client<D> {
         }
     }
 
-    pub(crate) fn get_object(&self, id: InnerObjectId) -> Result<Object<Data<D>>, InvalidId> {
+    pub(crate) fn get_object(&self, id: &InnerObjectId) -> Result<Object<Data<D>>, InvalidId> {
         let object = self.map.find(id.id).ok_or(InvalidId)?;
         if object.data.serial != id.serial {
             return Err(InvalidId);
@@ -401,7 +395,7 @@ impl<D> Client<D> {
         let object = self.map.find(pid).ok_or(InvalidId)?;
         Ok(InnerObjectId {
             id: pid,
-            client_id: self.id.clone(),
+            client_id: self.id,
             serial: object.data.serial,
             interface: object.interface,
         })
@@ -411,11 +405,11 @@ impl<D> Client<D> {
         pending_destructors.extend(self.map.all_objects().map(|(id, obj)| {
             (
                 obj.data.user_data.clone(),
-                self.id.clone(),
+                self.id,
                 InnerObjectId {
                     id,
                     serial: obj.data.serial,
-                    client_id: self.id.clone(),
+                    client_id: self.id,
                     interface: obj.interface,
                 },
             )
@@ -424,13 +418,13 @@ impl<D> Client<D> {
 
     pub(crate) fn handle_display_request(
         &mut self,
-        message: Message<u32, OwnedFd>,
+        message: OwnedMessage<u32>,
         registry: &mut Registry<D>,
     ) {
         match message.opcode {
             // wl_display.sync(new id wl_callback)
             0 => {
-                if let [Argument::NewId(new_id)] = message.args[..] {
+                if let [OwnedArgument::NewId(new_id)] = message.args[..] {
                     let serial = self.next_serial();
                     let callback_obj = Object {
                         interface: &WL_CALLBACK_INTERFACE,
@@ -447,20 +441,20 @@ impl<D> Client<D> {
                     let cb_id = ObjectId {
                         id: InnerObjectId {
                             id: new_id,
-                            client_id: self.id.clone(),
+                            client_id: self.id,
                             serial,
                             interface: &WL_CALLBACK_INTERFACE,
                         },
                     };
                     // send wl_callback.done(0) this callback does not have any meaningful destructor to run, we can ignore it
-                    self.send_event(message!(cb_id, 0, [Argument::Uint(0)]), None).unwrap();
+                    self.send_event(message!(&cb_id, 0, [Argument::Uint(0)]), None).unwrap();
                 } else {
                     unreachable!()
                 }
             }
             // wl_display.get_registry(new id wl_registry)
             1 => {
-                if let [Argument::NewId(new_id)] = message.args[..] {
+                if let [OwnedArgument::NewId(new_id)] = message.args[..] {
                     let serial = self.next_serial();
                     let registry_obj = Object {
                         interface: &WL_REGISTRY_INTERFACE,
@@ -470,7 +464,7 @@ impl<D> Client<D> {
                     let registry_id = InnerObjectId {
                         id: new_id,
                         serial,
-                        client_id: self.id.clone(),
+                        client_id: self.id,
                         interface: &WL_REGISTRY_INTERFACE,
                     };
                     if let Err(()) = self.map.insert_at(new_id, registry_obj) {
@@ -502,17 +496,17 @@ impl<D> Client<D> {
     #[allow(clippy::type_complexity)]
     pub(crate) fn handle_registry_request(
         &mut self,
-        message: Message<u32, OwnedFd>,
+        message: OwnedMessage<u32>,
         registry: &mut Registry<D>,
     ) -> Option<(InnerClientId, InnerGlobalId, InnerObjectId, Arc<dyn GlobalHandler<D>>)> {
         match message.opcode {
             // wl_registry.bind(uint name, str interface, uint version, new id)
             0 => {
                 if let [
-                    Argument::Uint(name),
-                    Argument::Str(Some(ref interface_name)),
-                    Argument::Uint(version),
-                    Argument::NewId(new_id),
+                    OwnedArgument::Uint(name),
+                    OwnedArgument::Str(Some(ref interface_name)),
+                    OwnedArgument::Uint(version),
+                    OwnedArgument::NewId(new_id),
                 ] = message.args[..]
                 {
                     if let Some((interface, global_id, handler)) =
@@ -532,14 +526,9 @@ impl<D> Client<D> {
                             return None;
                         }
                         Some((
-                            self.id.clone(),
+                            self.id,
                             global_id,
-                            InnerObjectId {
-                                id: new_id,
-                                client_id: self.id.clone(),
-                                interface,
-                                serial,
-                            },
+                            InnerObjectId { id: new_id, client_id: self.id, interface, serial },
                             handler.clone(),
                         ))
                     } else {
@@ -577,8 +566,8 @@ impl<D> Client<D> {
     pub(crate) fn process_request(
         &mut self,
         object: &Object<Data<D>>,
-        message: Message<u32, OwnedFd>,
-    ) -> Option<(ArgSmallVec<OwnedFd>, bool, Option<InnerObjectId>)> {
+        message: OwnedMessage<u32>,
+    ) -> Option<(OwnedArgSmallVec, bool, Option<InnerObjectId>)> {
         let message_desc = object.interface.requests.get(message.opcode as usize).unwrap();
 
         if message_desc.since > object.version {
@@ -603,13 +592,13 @@ impl<D> Client<D> {
         let mut created_id = None;
         for (i, arg) in message.args.into_iter().enumerate() {
             new_args.push(match arg {
-                Argument::Array(a) => Argument::Array(a),
-                Argument::Int(i) => Argument::Int(i),
-                Argument::Uint(u) => Argument::Uint(u),
-                Argument::Str(s) => Argument::Str(s),
-                Argument::Fixed(f) => Argument::Fixed(f),
-                Argument::Fd(f) => Argument::Fd(f),
-                Argument::Object(o) => {
+                OwnedArgument::Array(a) => OwnedArgument::Array(a),
+                OwnedArgument::Int(i) => OwnedArgument::Int(i),
+                OwnedArgument::Uint(u) => OwnedArgument::Uint(u),
+                OwnedArgument::Str(s) => OwnedArgument::Str(s),
+                OwnedArgument::Fixed(f) => OwnedArgument::Fixed(f),
+                OwnedArgument::Fd(f) => OwnedArgument::Fd(f),
+                OwnedArgument::Object(o) => {
                     let next_interface = arg_interfaces.next();
                     if o != 0 {
                         // Lookup the object to make the appropriate Id
@@ -639,9 +628,9 @@ impl<D> Client<D> {
                                 return None;
                             }
                         }
-                        Argument::Object(ObjectId { id: InnerObjectId { id: o, client_id: self.id.clone(), serial: obj.data.serial, interface: obj.interface }})
+                        OwnedArgument::Object(ObjectId { id: InnerObjectId { id: o, client_id: self.id, serial: obj.data.serial, interface: obj.interface }})
                     } else if matches!(message_desc.signature[i], ArgumentType::Object(AllowNull::Yes)) {
-                        Argument::Object(ObjectId { id: InnerObjectId { id: 0, client_id: self.id.clone(), serial: 0, interface: &ANONYMOUS_INTERFACE }})
+                        OwnedArgument::Object(super::InnerHandle::null_id().clone())
                     } else {
                         self.post_display_error(
                             DisplayError::InvalidObject,
@@ -654,7 +643,7 @@ impl<D> Client<D> {
                         return None;
                     }
                 }
-                Argument::NewId(new_id) => {
+                OwnedArgument::NewId(new_id) => {
                     // An object should be created
                     let child_interface = match message_desc.child_interface {
                         Some(iface) => iface,
@@ -672,8 +661,8 @@ impl<D> Client<D> {
                         }
                     };
 
-                    let child_id = InnerObjectId { id: new_id, client_id: self.id.clone(), serial: child_obj.data.serial, interface: child_obj.interface };
-                    created_id = Some(child_id.clone());
+                    let child_id = InnerObjectId { id: new_id, client_id: self.id, serial: child_obj.data.serial, interface: child_obj.interface };
+                    created_id = Some(child_id);
 
                     if let Err(()) = self.map.insert_at(new_id, child_obj) {
                         // abort parsing, this is an unrecoverable error
@@ -684,7 +673,7 @@ impl<D> Client<D> {
                         return None;
                     }
 
-                    Argument::NewId(ObjectId { id: child_id })
+                    OwnedArgument::NewId(ObjectId { id: child_id })
                 }
             });
         }
@@ -728,7 +717,7 @@ impl<D> ClientStore<D> {
 
         let id = InnerClientId { id: id as u32, serial };
 
-        *place = Some(Client::new(stream, id.clone(), self.debug, data, buffer_size));
+        *place = Some(Client::new(stream, id, self.debug, data, buffer_size));
 
         id
     }
@@ -778,7 +767,7 @@ impl<D> ClientStore<D> {
 
     pub(crate) fn all_clients_id(&self) -> impl Iterator<Item = ClientId> + '_ {
         self.clients.iter().flat_map(|opt| {
-            opt.as_ref().filter(|c| !c.killed).map(|client| ClientId { id: client.id.clone() })
+            opt.as_ref().filter(|c| !c.killed).map(|client| ClientId { id: client.id })
         })
     }
 }

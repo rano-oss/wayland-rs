@@ -246,7 +246,7 @@ fn creation_destruction_race() {
     // server sends a newid event to dd1 while dd1 gets destroyed
     client_dd1.release();
 
-    let s_client = server.display.handle().get_client(s_dd1.id()).unwrap();
+    let s_client = server.display.handle().get_client(&s_dd1.id()).unwrap();
     // Send a first NewID
     let offer1 = s_client
         .create_resource::<ServerDO, (), ServerHandler>(

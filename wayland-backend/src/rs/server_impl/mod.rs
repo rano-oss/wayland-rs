@@ -1,9 +1,8 @@
 //! Server-side rust implementation of a Wayland protocol backend
 
-use std::os::unix::io::OwnedFd;
 use std::{fmt, sync::Arc};
 
-use crate::protocol::{Interface, Message, same_interface};
+use crate::protocol::{Interface, OwnedMessage, same_interface};
 
 mod client;
 mod common_poll;
@@ -16,7 +15,7 @@ pub use handle::{InnerHandle, WeakInnerHandle};
 
 use super::server::*;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct InnerObjectId {
     id: u32,
     serial: u32,
@@ -34,6 +33,9 @@ impl InnerObjectId {
     }
 
     pub fn same_client_as(&self, other: &Self) -> bool {
+        if self.is_null() || other.is_null() {
+            return false;
+        }
         self.client_id == other.client_id
     }
 
@@ -76,7 +78,7 @@ impl std::hash::Hash for InnerObjectId {
 }
 
 /// An id of a client connected to the server.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InnerClientId {
     id: u32,
     serial: u32,
@@ -93,7 +95,7 @@ impl InnerClientId {
 }
 
 /// The ID of a global
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InnerGlobalId {
     id: u32,
     serial: u32,
@@ -120,14 +122,14 @@ impl<D> ObjectData<D> for UninitObjectData {
         self: Arc<Self>,
         _: &Handle,
         _: &mut D,
-        _: ClientId,
-        msg: Message<ObjectId, OwnedFd>,
+        _: &ClientId,
+        msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData<D>>> {
         panic!("Received a message on an uninitialized object: {msg:?}");
     }
 
     #[cfg_attr(unstable_coverage, coverage(off))]
-    fn destroyed(self: Arc<Self>, _: &Handle, _: &mut D, _: ClientId, _: ObjectId) {}
+    fn destroyed(self: Arc<Self>, _: &Handle, _: &mut D, _: &ClientId, _: &ObjectId) {}
 
     #[cfg_attr(unstable_coverage, coverage(off))]
     fn debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

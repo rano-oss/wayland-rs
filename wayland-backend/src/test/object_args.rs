@@ -3,8 +3,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::protocol::Message;
-
 use super::*;
 
 struct ServerData(AtomicBool);
@@ -16,21 +14,17 @@ macro_rules! impl_server_objectdata {
                 self: Arc<Self>,
                 handle: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                msg: Message<$server_backend::ObjectId, OwnedFd>,
+                _: &$server_backend::ClientId,
+                msg: OwnedMessage<$server_backend::ObjectId>,
             ) -> Option<Arc<dyn $server_backend::ObjectData<()>>> {
                 if msg.opcode == 1 {
                     assert_eq!(
-                        handle.object_info(msg.sender_id.clone()).unwrap().interface.name,
+                        handle.object_info(&msg.sender_id).unwrap().interface.name,
                         "test_global"
                     );
-                    if let [Argument::NewId(secondary)] = &msg.args[..] {
+                    if let [OwnedArgument::NewId(secondary)] = &msg.args[..] {
                         handle
-                            .send_event(message!(
-                                msg.sender_id,
-                                1,
-                                [Argument::Object(secondary.clone())]
-                            ))
+                            .send_event(message!(&msg.sender_id, 1, [Argument::Object(secondary)]))
                             .unwrap();
                         return Some(self);
                     } else {
@@ -40,24 +34,24 @@ macro_rules! impl_server_objectdata {
                     return Some(self);
                 } else if msg.opcode == 3 {
                     assert_eq!(
-                        handle.object_info(msg.sender_id).unwrap().interface.name,
+                        handle.object_info(&msg.sender_id).unwrap().interface.name,
                         "test_global"
                     );
                     if let [
-                        Argument::Object(secondary),
-                        Argument::Object(tertiary),
-                        Argument::Uint(u),
+                        OwnedArgument::Object(secondary),
+                        OwnedArgument::Object(tertiary),
+                        OwnedArgument::Uint(u),
                     ] = &msg.args[..]
                     {
                         assert_eq!(
-                            handle.object_info(secondary.clone()).unwrap().interface.name,
+                            handle.object_info(secondary).unwrap().interface.name,
                             "secondary"
                         );
                         if *u == 1 {
                             assert!(tertiary.is_null());
                         } else if *u == 2 {
                             assert_eq!(
-                                handle.object_info(tertiary.clone()).unwrap().interface.name,
+                                handle.object_info(tertiary).unwrap().interface.name,
                                 "tertiary"
                             );
                             self.0.store(true, Ordering::SeqCst);
@@ -66,8 +60,11 @@ macro_rules! impl_server_objectdata {
                         panic!("Bad argument list!");
                     }
                 } else if msg.opcode == 6 {
-                    if let [Argument::NewId(_), Argument::Object(sec), Argument::Object(ter)] =
-                        &msg.args[..]
+                    if let [
+                        OwnedArgument::NewId(_),
+                        OwnedArgument::Object(sec),
+                        OwnedArgument::Object(ter),
+                    ] = &msg.args[..]
                     {
                         assert!(sec.is_null());
                         assert!(&ter.interface().name == &interfaces::TERTIARY_INTERFACE.name);
@@ -84,8 +81,8 @@ macro_rules! impl_server_objectdata {
                 self: Arc<Self>,
                 _: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                _: $server_backend::ObjectId,
+                _: &$server_backend::ClientId,
+                _: &$server_backend::ObjectId,
             ) {
             }
         }
@@ -95,9 +92,9 @@ macro_rules! impl_server_objectdata {
                 self: Arc<Self>,
                 _: &$server_backend::Handle,
                 _: &mut (),
-                _: $server_backend::ClientId,
-                _: $server_backend::GlobalId,
-                _: $server_backend::ObjectId,
+                _: &$server_backend::ClientId,
+                _: &$server_backend::GlobalId,
+                _: &$server_backend::ObjectId,
             ) -> Arc<dyn $server_backend::ObjectData<()>> {
                 self
             }
@@ -116,11 +113,11 @@ macro_rules! impl_client_objectdata {
             fn event(
                 self: Arc<Self>,
                 handle: &$client_backend::Backend,
-                msg: Message<$client_backend::ObjectId, OwnedFd>,
+                msg: OwnedMessage<$client_backend::ObjectId>,
             ) -> Option<Arc<dyn $client_backend::ObjectData>> {
                 assert_eq!(msg.opcode, 1);
-                if let [Argument::Object(secondary)] = &msg.args[..] {
-                    let info = handle.info(secondary.clone()).unwrap();
+                if let [OwnedArgument::Object(secondary)] = &msg.args[..] {
+                    let info = handle.info(&secondary).unwrap();
                     assert_eq!(info.id, 4);
                     assert_eq!(info.interface.name, "secondary");
                 } else {
@@ -129,7 +126,7 @@ macro_rules! impl_client_objectdata {
                 self.0.store(true, Ordering::SeqCst);
                 None
             }
-            fn destroyed(&self, _object_id: $client_backend::ObjectId) {}
+            fn destroyed(&self, _object_id: &$client_backend::ObjectId) {}
         }
     };
 }
@@ -154,7 +151,7 @@ expand_test!(create_objects, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -163,7 +160,7 @@ expand_test!(create_objects, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -181,22 +178,14 @@ expand_test!(create_objects, {
     // create the two objects
     let secondary_id = client
         .send_request(
-            message!(
-                test_global_id.clone(),
-                1,
-                [Argument::NewId(client_backend::ObjectId::null())]
-            ),
+            message!(&test_global_id, 1, [Argument::NewId(client_backend::ObjectId::null())]),
             Some(client_data.clone()),
             None,
         )
         .unwrap();
     let tertiary_id = client
         .send_request(
-            message!(
-                test_global_id.clone(),
-                2,
-                [Argument::NewId(client_backend::ObjectId::null())]
-            ),
+            message!(&test_global_id, 2, [Argument::NewId(client_backend::ObjectId::null())]),
             Some(client_data.clone()),
             None,
         )
@@ -205,10 +194,10 @@ expand_test!(create_objects, {
     client
         .send_request(
             message!(
-                test_global_id.clone(),
+                &test_global_id,
                 3,
                 [
-                    Argument::Object(secondary_id.clone()),
+                    Argument::Object(&secondary_id),
                     Argument::Object(client_backend::ObjectId::null()),
                     Argument::Uint(1),
                 ],
@@ -220,9 +209,13 @@ expand_test!(create_objects, {
     client
         .send_request(
             message!(
-                test_global_id,
+                &test_global_id,
                 3,
-                [Argument::Object(secondary_id), Argument::Object(tertiary_id), Argument::Uint(2)],
+                [
+                    Argument::Object(&secondary_id),
+                    Argument::Object(&tertiary_id),
+                    Argument::Uint(2)
+                ],
             ),
             None,
             None,
@@ -253,7 +246,7 @@ expand_test!(panic bad_interface, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1))
         )
@@ -262,7 +255,7 @@ expand_test!(panic bad_interface, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -279,18 +272,18 @@ expand_test!(panic bad_interface, {
         .unwrap();
     // create the two objects
     let secondary_id = client
-        .send_request(message!(test_global_id.clone(), 1, [Argument::NewId(client_backend::ObjectId::null())]), Some(Arc::new(DoNothingData)), None)
+        .send_request(message!(&test_global_id, 1, [Argument::NewId(client_backend::ObjectId::null())]), Some(Arc::new(DoNothingData)), None)
         .unwrap();
     let tertiary_id = client
-        .send_request(message!(test_global_id.clone(), 2, [Argument::NewId(client_backend::ObjectId::null())]), Some(Arc::new(DoNothingData)), None)
+        .send_request(message!(&test_global_id, 2, [Argument::NewId(client_backend::ObjectId::null())]), Some(Arc::new(DoNothingData)), None)
         .unwrap();
     // link them, argument order is wrong, should panic
     client
         .send_request(
             message!(
-                test_global_id,
+                &test_global_id,
                 3,
-                [Argument::Object(tertiary_id), Argument::Object(secondary_id), Argument::Uint(42)],
+                [Argument::Object(&tertiary_id), Argument::Object(&secondary_id), Argument::Uint(42)],
             ),
             None,
             None,
@@ -313,7 +306,7 @@ expand_test!(panic double_null, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1))
         )
@@ -322,7 +315,7 @@ expand_test!(panic double_null, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -341,7 +334,7 @@ expand_test!(panic double_null, {
     client
         .send_request(
             message!(
-                test_global_id,
+                &test_global_id,
                 3,
                 [
                     Argument::Object(client_backend::ObjectId::null()),
@@ -370,7 +363,7 @@ expand_test!(null_obj_followed_by_interface, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -379,7 +372,7 @@ expand_test!(null_obj_followed_by_interface, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -397,11 +390,7 @@ expand_test!(null_obj_followed_by_interface, {
     // create the an object
     let tertiary_id = client
         .send_request(
-            message!(
-                test_global_id.clone(),
-                2,
-                [Argument::NewId(client_backend::ObjectId::null())]
-            ),
+            message!(&test_global_id, 2, [Argument::NewId(client_backend::ObjectId::null())]),
             Some(Arc::new(DoNothingData)),
             None,
         )
@@ -411,11 +400,11 @@ expand_test!(null_obj_followed_by_interface, {
     client
         .send_request(
             message!(
-                test_global_id,
+                &test_global_id,
                 5,
                 [
                     Argument::Object(client_backend::ObjectId::null()),
-                    Argument::Object(tertiary_id),
+                    Argument::Object(&tertiary_id),
                 ],
             ),
             None,
@@ -439,7 +428,7 @@ expand_test!(new_id_null_and_non_null, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -448,7 +437,7 @@ expand_test!(new_id_null_and_non_null, {
     let test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),
@@ -466,11 +455,7 @@ expand_test!(new_id_null_and_non_null, {
     // create the an object
     let tertiary_id = client
         .send_request(
-            message!(
-                test_global_id.clone(),
-                2,
-                [Argument::NewId(client_backend::ObjectId::null())]
-            ),
+            message!(&test_global_id, 2, [Argument::NewId(client_backend::ObjectId::null())]),
             Some(Arc::new(DoNothingData)),
             None,
         )
@@ -480,12 +465,12 @@ expand_test!(new_id_null_and_non_null, {
     let _quad_id = client
         .send_request(
             message!(
-                test_global_id,
+                &test_global_id,
                 6, // newid_and_allow_null
                 [
                     Argument::NewId(client_backend::ObjectId::null()),
                     Argument::Object(client_backend::ObjectId::null()),
-                    Argument::Object(tertiary_id),
+                    Argument::Object(&tertiary_id),
                 ],
             ),
             Some(Arc::new(DoNothingData)),

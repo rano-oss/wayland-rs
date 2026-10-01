@@ -1,4 +1,3 @@
-use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 
 use wayland_backend::server::{
@@ -18,8 +17,8 @@ unsafe impl<I, D, U: Send + Sync> Sync for GlobalData<I, U, D> {}
 impl<I: Resource + 'static, D: 'static, U: GlobalDispatch<I, D> + Send + Sync + 'static>
     GlobalHandler<D> for GlobalData<I, U, D>
 {
-    fn can_view(&self, id: ClientId, data: &Arc<dyn ClientData>, _: GlobalId) -> bool {
-        let client = Client { id, data: data.clone() };
+    fn can_view(&self, id: &ClientId, data: &Arc<dyn ClientData>, _: &GlobalId) -> bool {
+        let client = Client { id: id.clone(), data: data.clone() };
         self.data.can_view(&client)
     }
 
@@ -27,13 +26,13 @@ impl<I: Resource + 'static, D: 'static, U: GlobalDispatch<I, D> + Send + Sync + 
         self: Arc<Self>,
         handle: &Handle,
         data: &mut D,
-        client_id: ClientId,
-        _: GlobalId,
-        object_id: ObjectId,
+        client_id: &ClientId,
+        _: &GlobalId,
+        object_id: &ObjectId,
     ) -> Arc<dyn ObjectData<D>> {
         let handle = DisplayHandle::from(handle.clone());
-        let client = Client::from_id(&handle, client_id).expect("Dead client in bind ?!");
-        let resource = <I as Resource>::from_id(&handle, object_id)
+        let client = Client::from_id(&handle, client_id.clone()).expect("Dead client in bind ?!");
+        let resource = <I as Resource>::from_id(&handle, object_id.clone())
             .expect("Wrong object_id in GlobalHandler ?!");
 
         let mut new_data = None;
@@ -71,8 +70,8 @@ impl<D> ObjectData<D> for ProtocolErrorData {
         self: Arc<Self>,
         _handle: &Handle,
         _data: &mut D,
-        _client_id: ClientId,
-        _msg: wayland_backend::protocol::Message<ObjectId, OwnedFd>,
+        _client_id: &ClientId,
+        _msg: wayland_backend::protocol::OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData<D>>> {
         None
     }
@@ -81,8 +80,8 @@ impl<D> ObjectData<D> for ProtocolErrorData {
         self: Arc<Self>,
         _handle: &Handle,
         _data: &mut D,
-        _client_id: ClientId,
-        _object_id: ObjectId,
+        _client_id: &ClientId,
+        _object_id: &ObjectId,
     ) {
     }
 }

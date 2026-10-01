@@ -3,8 +3,6 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use crate::protocol::Message;
-
 use super::*;
 
 struct ServerData;
@@ -16,14 +14,14 @@ macro_rules! impl_globalhandler {
                 self: Arc<Self>,
                 handle: &$server_backend::Handle,
                 _: &mut (),
-                client: $server_backend::ClientId,
-                _: $server_backend::GlobalId,
-                object_id: $server_backend::ObjectId,
+                client: &$server_backend::ClientId,
+                _: &$server_backend::GlobalId,
+                object_id: &$server_backend::ObjectId,
             ) -> Arc<dyn $server_backend::ObjectData<()>> {
                 // send the first event with a newid & a null object
                 let obj_1 = handle
                     .create_object::<()>(
-                        client.clone(),
+                        &client,
                         &interfaces::QUAD_INTERFACE,
                         3,
                         Arc::new(DoNothingData),
@@ -32,9 +30,9 @@ macro_rules! impl_globalhandler {
                 let null_id = $server_backend::ObjectId::null();
                 handle
                     .send_event(message!(
-                        object_id.clone(),
+                        object_id,
                         2,
-                        [Argument::NewId(obj_1.clone()), Argument::Object(null_id)],
+                        [Argument::NewId(&obj_1), Argument::Object(null_id)],
                     ))
                     .unwrap();
                 // send the second
@@ -48,9 +46,9 @@ macro_rules! impl_globalhandler {
                     .unwrap();
                 handle
                     .send_event(message!(
-                        object_id.clone(),
+                        object_id,
                         2,
-                        [Argument::NewId(obj_2), Argument::Object(obj_1)]
+                        [Argument::NewId(&obj_2), Argument::Object(&obj_1)]
                     ))
                     .unwrap();
                 Arc::new(DoNothingData)
@@ -70,12 +68,14 @@ macro_rules! impl_client_objectdata {
             fn event(
                 self: Arc<Self>,
                 handle: &$client_backend::Backend,
-                msg: Message<$client_backend::ObjectId, OwnedFd>,
+                msg: OwnedMessage<$client_backend::ObjectId>,
             ) -> Option<Arc<dyn $client_backend::ObjectData>> {
                 assert_eq!(msg.opcode, 2);
                 if self.0.load(Ordering::SeqCst) == 0 {
-                    if let [Argument::NewId(obj_1), Argument::Object(null_id)] = &msg.args[..] {
-                        let info = handle.info(obj_1.clone()).unwrap();
+                    if let [OwnedArgument::NewId(obj_1), OwnedArgument::Object(null_id)] =
+                        &msg.args[..]
+                    {
+                        let info = handle.info(obj_1).unwrap();
                         assert_eq!(info.id, 0xFF00_0000);
                         assert_eq!(info.interface.name, "quad");
                         assert!(null_id.is_null());
@@ -84,13 +84,15 @@ macro_rules! impl_client_objectdata {
                     }
                     self.0.store(1, Ordering::SeqCst);
                 } else {
-                    if let [Argument::NewId(obj_2), Argument::Object(obj_1)] = &msg.args[..] {
+                    if let [OwnedArgument::NewId(obj_2), OwnedArgument::Object(obj_1)] =
+                        &msg.args[..]
+                    {
                         // check obj1
-                        let info = handle.info(obj_1.clone()).unwrap();
+                        let info = handle.info(obj_1).unwrap();
                         assert_eq!(info.id, 0xFF00_0000);
                         assert_eq!(info.interface.name, "quad");
                         // check obj2
-                        let info = handle.info(obj_2.clone()).unwrap();
+                        let info = handle.info(obj_2).unwrap();
                         assert_eq!(info.id, 0xFF00_0001);
                         assert_eq!(info.interface.name, "quad");
                     } else {
@@ -100,7 +102,7 @@ macro_rules! impl_client_objectdata {
                 }
                 Some(self)
             }
-            fn destroyed(&self, _object_id: $client_backend::ObjectId) {}
+            fn destroyed(&self, _object_id: &$client_backend::ObjectId) {}
         }
     };
 }
@@ -123,7 +125,7 @@ expand_test!(server_created_object, {
     let client_display = client.display_id();
     let registry_id = client
         .send_request(
-            message!(client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
+            message!(&client_display, 1, [Argument::NewId(client_backend::ObjectId::null())],),
             Some(Arc::new(DoNothingData)),
             Some((&interfaces::WL_REGISTRY_INTERFACE, 1)),
         )
@@ -132,7 +134,7 @@ expand_test!(server_created_object, {
     let _test_global_id = client
         .send_request(
             message!(
-                registry_id,
+                &registry_id,
                 0,
                 [
                     Argument::Uint(1),

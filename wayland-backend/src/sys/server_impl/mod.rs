@@ -3,12 +3,13 @@
 use std::{
     any::Any,
     ffi::{CStr, CString},
+    num::{NonZero, NonZeroU32},
     os::raw::{c_int, c_void},
     os::unix::{
         io::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd},
         net::UnixStream,
     },
-    ptr::NonNull,
+    ptr::{self, NonNull},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -17,7 +18,7 @@ use std::{
 
 use crate::protocol::{
     ANONYMOUS_INTERFACE, AllowNull, Argument, ArgumentType, Interface, Message, ObjectInfo,
-    check_for_signature, same_interface,
+    OwnedArgument, OwnedMessage, check_for_signature, same_interface,
 };
 use scoped_tls::scoped_thread_local;
 use smallvec::SmallVec;
@@ -44,27 +45,33 @@ scoped_thread_local! {
     static PENDING_DESTRUCTORS: *mut c_void
 }
 
-/// An id of an object on a wayland server.
 #[derive(Clone)]
-pub struct InnerObjectId {
-    id: u32,
-    ptr: *mut wl_resource,
+pub struct Resource {
+    id: NonZeroU32,
+    ptr: NonNull<wl_resource>,
     alive: Arc<AtomicBool>,
     interface: &'static Interface,
+}
+
+/// An id of an object on a wayland server.
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub enum InnerObjectId {
+    Resource(Resource),
+    Null,
 }
 
 unsafe impl Send for InnerObjectId {}
 unsafe impl Sync for InnerObjectId {}
 
-impl std::cmp::PartialEq for InnerObjectId {
+impl std::cmp::PartialEq for Resource {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.alive, &other.alive)
     }
 }
 
-impl std::cmp::Eq for InnerObjectId {}
+impl std::cmp::Eq for Resource {}
 
-impl std::hash::Hash for InnerObjectId {
+impl std::hash::Hash for Resource {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state);
         self.ptr.hash(state);
@@ -75,7 +82,7 @@ impl std::hash::Hash for InnerObjectId {
 impl std::fmt::Display for InnerObjectId {
     #[cfg_attr(unstable_coverage, coverage(off))]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}", self.interface.name, self.id)
+        write!(f, "{}@{}", self.interface().name, self.protocol_id())
     }
 }
 
@@ -88,35 +95,48 @@ impl std::fmt::Debug for InnerObjectId {
 
 impl InnerObjectId {
     pub fn is_null(&self) -> bool {
-        self.ptr.is_null()
+        matches!(self, InnerObjectId::Null)
     }
 
     pub fn interface(&self) -> &'static Interface {
-        self.interface
+        match self {
+            Self::Resource(Resource { interface, .. }) => interface,
+            Self::Null => &ANONYMOUS_INTERFACE,
+        }
     }
 
     pub fn same_client_as(&self, other: &Self) -> bool {
-        if !self.alive.load(Ordering::Acquire) || !other.alive.load(Ordering::Acquire) {
+        let (InnerObjectId::Resource(resource1), InnerObjectId::Resource(resource2)) =
+            (self, other)
+        else {
+            return false;
+        };
+        if !resource1.alive.load(Ordering::Acquire) || !resource2.alive.load(Ordering::Acquire) {
             return false;
         }
-        let my_client_ptr =
-            unsafe { ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, self.ptr) };
-        let other_client_ptr =
-            unsafe { ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, other.ptr) };
+        let my_client_ptr = unsafe {
+            ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, resource1.ptr.as_ptr())
+        };
+        let other_client_ptr = unsafe {
+            ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, resource2.ptr.as_ptr())
+        };
         my_client_ptr == other_client_ptr
     }
 
     pub fn protocol_id(&self) -> u32 {
-        self.id
+        match self {
+            Self::Resource(Resource { id, .. }) => u32::from(*id),
+            Self::Null => 0,
+        }
     }
 
     pub unsafe fn from_ptr(
         interface: Option<&'static Interface>,
         ptr: NonNull<wl_resource>,
     ) -> Result<InnerObjectId, InvalidId> {
-        let ptr = ptr.as_ptr();
-
-        let id = ffi_dispatch!(wayland_server_handle(), wl_resource_get_id, ptr);
+        let id =
+            NonZero::new(ffi_dispatch!(wayland_server_handle(), wl_resource_get_id, ptr.as_ptr()))
+                .unwrap();
 
         // This is a horrible back to work around the fact that it is not possible to check if the
         // resource implementation is RUST_MANAGED without knowing the interface of that object...
@@ -124,7 +144,8 @@ impl InnerObjectId {
             // wl_resource_instance_of uses wl_interface_equals, which only checks that the interface name
             // is correct, so we create a temporary dummy wl_interface with the correct name so that the
             // check only actually verifies that the object is RUST_MANAGED
-            let iface_name = ffi_dispatch!(wayland_server_handle(), wl_resource_get_class, ptr);
+            let iface_name =
+                ffi_dispatch!(wayland_server_handle(), wl_resource_get_class, ptr.as_ptr());
             let dummy_iface = wl_interface {
                 name: iface_name,
                 version: 0,
@@ -136,7 +157,7 @@ impl InnerObjectId {
             ffi_dispatch!(
                 wayland_server_handle(),
                 wl_resource_instance_of,
-                ptr,
+                ptr.as_ptr(),
                 &dummy_iface,
                 &RUST_MANAGED as *const u8 as *const _
             ) != 0
@@ -147,8 +168,9 @@ impl InnerObjectId {
             // 1) ResourceUserData is #[repr(C)], so its layout does not depend on D
             // 2) we are only accessing the field `.alive`, which type is independent of D
             //
-            let udata = ffi_dispatch!(wayland_server_handle(), wl_resource_get_user_data, ptr)
-                as *mut ResourceUserData<()>;
+            let udata =
+                ffi_dispatch!(wayland_server_handle(), wl_resource_get_user_data, ptr.as_ptr())
+                    as *mut ResourceUserData<()>;
             let alive = unsafe { (*udata).alive.clone() };
             let udata_iface = unsafe { (*udata).interface };
             if let Some(iface) = interface {
@@ -156,7 +178,7 @@ impl InnerObjectId {
                     return Err(InvalidId);
                 }
             }
-            Ok(InnerObjectId { id, ptr, alive, interface: udata_iface })
+            Ok(InnerObjectId::Resource(Resource { id, ptr, alive, interface: udata_iface }))
         } else if let Some(interface) = interface {
             let iface_c_ptr = &interface
                 .c_interface
@@ -164,7 +186,11 @@ impl InnerObjectId {
                 .0;
             // Safety: the provided pointer must be a valid wayland object
             let ptr_iface_name = unsafe {
-                CStr::from_ptr(ffi_dispatch!(wayland_server_handle(), wl_resource_get_class, ptr))
+                CStr::from_ptr(ffi_dispatch!(
+                    wayland_server_handle(),
+                    wl_resource_get_class,
+                    ptr.as_ptr()
+                ))
             };
             // Safety: the code generated by wayland-scanner is valid
             let provided_iface_name = unsafe { CStr::from_ptr(iface_c_ptr.name) };
@@ -175,7 +201,7 @@ impl InnerObjectId {
             let listener = ffi_dispatch!(
                 wayland_server_handle(),
                 wl_resource_get_destroy_listener,
-                ptr,
+                ptr.as_ptr(),
                 external_resource_destroy_notify
             );
             let alive = if listener.is_null() {
@@ -190,7 +216,7 @@ impl InnerObjectId {
                 ffi_dispatch!(
                     wayland_server_handle(),
                     wl_resource_add_destroy_listener,
-                    ptr,
+                    ptr.as_ptr(),
                     listener
                 );
                 alive
@@ -201,18 +227,17 @@ impl InnerObjectId {
                     (*data).alive.clone()
                 }
             };
-            Ok(InnerObjectId { id, ptr, alive, interface })
+            Ok(InnerObjectId::Resource(Resource { id, ptr, alive, interface }))
         } else {
             Err(InvalidId)
         }
     }
 
     pub fn as_ptr(&self) -> Result<NonNull<wl_resource>, InvalidId> {
-        if self.alive.load(Ordering::Acquire) {
-            NonNull::new(self.ptr).ok_or(InvalidId)
-        } else {
-            Err(InvalidId)
-        }
+        let InnerObjectId::Resource(resource) = self else {
+            return Err(InvalidId);
+        };
+        if resource.alive.load(Ordering::Acquire) { Ok(resource.ptr) } else { Err(InvalidId) }
     }
 }
 
@@ -379,7 +404,7 @@ impl<D> InnerBackend<D> {
         })
     }
 
-    pub fn flush(&self, client: Option<ClientId>) -> std::io::Result<()> {
+    pub fn flush(&self, client: Option<&ClientId>) -> std::io::Result<()> {
         self.state.lock().unwrap().flush(client)
     }
 
@@ -402,7 +427,7 @@ impl<D> InnerBackend<D> {
     pub fn dispatch_client(
         &self,
         data: &mut D,
-        _client_id: InnerClientId,
+        _client_id: &InnerClientId,
     ) -> std::io::Result<usize> {
         self.dispatch_all_clients(data)
     }
@@ -420,7 +445,7 @@ impl<D> InnerBackend<D> {
             std::mem::take(&mut self.state.lock().unwrap().pending_destructors);
         for (object, client_id, object_id) in pending_destructors {
             let handle = self.handle();
-            object.clone().destroyed(&handle, data, client_id, object_id);
+            object.clone().destroyed(&handle, data, &client_id, &object_id);
         }
 
         if ret < 0 { Err(std::io::Error::last_os_error()) } else { Ok(ret as usize) }
@@ -487,7 +512,7 @@ impl InnerHandle {
         WeakInnerHandle { state: Arc::downgrade(&self.state) }
     }
 
-    pub fn object_info(&self, id: InnerObjectId) -> Result<ObjectInfo, InvalidId> {
+    pub fn object_info(&self, id: &InnerObjectId) -> Result<ObjectInfo, InvalidId> {
         self.state.lock().unwrap().object_info(id)
     }
 
@@ -499,33 +524,33 @@ impl InnerHandle {
         self.state.lock().unwrap().insert_client(stream, data)
     }
 
-    pub fn get_client(&self, id: InnerObjectId) -> Result<ClientId, InvalidId> {
+    pub fn get_client(&self, id: &InnerObjectId) -> Result<ClientId, InvalidId> {
         self.state.lock().unwrap().get_client(id)
     }
 
-    pub fn get_client_data(&self, id: InnerClientId) -> Result<Arc<dyn ClientData>, InvalidId> {
+    pub fn get_client_data(&self, id: &InnerClientId) -> Result<Arc<dyn ClientData>, InvalidId> {
         self.state.lock().unwrap().get_client_data(id)
     }
 
-    pub fn get_client_credentials(&self, id: InnerClientId) -> Result<Credentials, InvalidId> {
+    pub fn get_client_credentials(&self, id: &InnerClientId) -> Result<Credentials, InvalidId> {
         self.state.lock().unwrap().get_client_credentials(id)
     }
 
-    pub fn with_all_clients(&self, mut f: impl FnMut(ClientId)) {
+    pub fn with_all_clients(&self, mut f: impl FnMut(&ClientId)) {
         self.state.lock().unwrap().with_all_clients(&mut f)
     }
 
     pub fn with_all_objects_for(
         &self,
-        client_id: InnerClientId,
-        mut f: impl FnMut(ObjectId),
+        client_id: &InnerClientId,
+        mut f: impl FnMut(&ObjectId),
     ) -> Result<(), InvalidId> {
         self.state.lock().unwrap().with_all_objects_for(client_id, &mut f)
     }
 
     pub fn object_for_protocol_id(
         &self,
-        client_id: InnerClientId,
+        client_id: &InnerClientId,
         interface: &'static Interface,
         protocol_id: u32,
     ) -> Result<ObjectId, InvalidId> {
@@ -534,7 +559,7 @@ impl InnerHandle {
 
     pub fn create_object<D: 'static>(
         &self,
-        client: InnerClientId,
+        client: &InnerClientId,
         interface: &'static Interface,
         version: u32,
         data: Arc<dyn ObjectData<D>>,
@@ -575,35 +600,32 @@ impl InnerHandle {
             .downcast_mut::<State<D>>()
             .expect("Wrong type parameter passed to Handle::destroy_object().");
 
-        if !id.id.alive.load(Ordering::Acquire) {
+        let InnerObjectId::Resource(resource) = &id.id else {
+            return Err(InvalidId);
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
 
         PENDING_DESTRUCTORS.set(&(&mut state.pending_destructors as *mut _ as *mut _), || unsafe {
-            ffi_dispatch!(wayland_server_handle(), wl_resource_destroy, id.id.ptr);
+            ffi_dispatch!(wayland_server_handle(), wl_resource_destroy, resource.ptr.as_ptr());
         });
 
         Ok(())
     }
 
-    pub fn null_id() -> ObjectId {
-        ObjectId {
-            id: InnerObjectId {
-                ptr: std::ptr::null_mut(),
-                id: 0,
-                alive: Arc::new(AtomicBool::new(false)),
-                interface: &ANONYMOUS_INTERFACE,
-            },
-        }
+    pub fn null_id() -> &'static ObjectId {
+        static NULL: ObjectId = ObjectId { id: InnerObjectId::Null };
+        &NULL
     }
 
-    pub fn send_event(&self, msg: Message<ObjectId, BorrowedFd>) -> Result<(), InvalidId> {
+    pub fn send_event(&self, msg: Message<ObjectId>) -> Result<(), InvalidId> {
         self.state.lock().unwrap().send_event(msg)
     }
 
     pub fn get_object_data<D: 'static>(
         &self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
     ) -> Result<Arc<dyn ObjectData<D>>, InvalidId> {
         let mut state = self.state.lock().unwrap();
         // Keep this guard alive while the code is run to protect the C state
@@ -611,11 +633,14 @@ impl InnerHandle {
             .downcast_mut::<State<D>>()
             .expect("Wrong type parameter passed to Handle::get_object_data().");
 
-        if !id.alive.load(Ordering::Acquire) {
+        let InnerObjectId::Resource(resource) = id else {
+            return Err(InvalidId);
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
 
-        let iface_c_ptr = &id
+        let iface_c_ptr = &resource
             .interface
             .c_interface
             .expect("[wayland-backend-sys] Cannot use Interface without c_interface!")
@@ -624,7 +649,7 @@ impl InnerHandle {
             ffi_dispatch!(
                 wayland_server_handle(),
                 wl_resource_instance_of,
-                id.ptr,
+                resource.ptr.as_ptr(),
                 iface_c_ptr,
                 &RUST_MANAGED as *const u8 as *const _
             ) != 0
@@ -634,8 +659,11 @@ impl InnerHandle {
         }
 
         let udata = unsafe {
-            &*(ffi_dispatch!(wayland_server_handle(), wl_resource_get_user_data, id.ptr)
-                as *mut ResourceUserData<D>)
+            &*(ffi_dispatch!(
+                wayland_server_handle(),
+                wl_resource_get_user_data,
+                resource.ptr.as_ptr()
+            ) as *mut ResourceUserData<D>)
         };
 
         Ok(udata.data.clone())
@@ -643,14 +671,14 @@ impl InnerHandle {
 
     pub fn get_object_data_any(
         &self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
     ) -> Result<Arc<dyn std::any::Any + Send + Sync>, InvalidId> {
         self.state.lock().unwrap().get_object_data_any(id)
     }
 
     pub fn set_object_data<D: 'static>(
         &self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
         data: Arc<dyn ObjectData<D>>,
     ) -> Result<(), InvalidId> {
         let mut state = self.state.lock().unwrap();
@@ -659,11 +687,14 @@ impl InnerHandle {
             .downcast_mut::<State<D>>()
             .expect("Wrong type parameter passed to Handle::set_object_data().");
 
-        if !id.alive.load(Ordering::Acquire) {
+        let InnerObjectId::Resource(resource) = id else {
+            return Err(InvalidId);
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
 
-        let iface_c_ptr = &id
+        let iface_c_ptr = &resource
             .interface
             .c_interface
             .expect("[wayland-backend-sys] Cannot use Interface without c_interface!")
@@ -672,7 +703,7 @@ impl InnerHandle {
             ffi_dispatch!(
                 wayland_server_handle(),
                 wl_resource_instance_of,
-                id.ptr,
+                resource.ptr.as_ptr(),
                 iface_c_ptr,
                 &RUST_MANAGED as *const u8 as *const _
             ) != 0
@@ -682,8 +713,11 @@ impl InnerHandle {
         }
 
         let udata = unsafe {
-            &mut *(ffi_dispatch!(wayland_server_handle(), wl_resource_get_user_data, id.ptr)
-                as *mut ResourceUserData<D>)
+            &mut *(ffi_dispatch!(
+                wayland_server_handle(),
+                wl_resource_get_user_data,
+                resource.ptr.as_ptr()
+            ) as *mut ResourceUserData<D>)
         };
 
         udata.data = data;
@@ -691,11 +725,11 @@ impl InnerHandle {
         Ok(())
     }
 
-    pub fn post_error(&self, object_id: InnerObjectId, error_code: u32, message: CString) {
+    pub fn post_error(&self, object_id: &InnerObjectId, error_code: u32, message: CString) {
         self.state.lock().unwrap().post_error(object_id, error_code, message)
     }
 
-    pub fn kill_client(&self, client_id: InnerClientId, reason: DisconnectReason) {
+    pub fn kill_client(&self, client_id: &InnerClientId, reason: DisconnectReason) {
         self.state.lock().unwrap().kill_client(client_id, reason)
     }
 
@@ -763,7 +797,7 @@ impl InnerHandle {
         id
     }
 
-    pub fn disable_global<D: 'static>(&self, id: InnerGlobalId) {
+    pub fn disable_global<D: 'static>(&self, id: &InnerGlobalId) {
         // check that `D` is correct
         {
             let mut state = self.state.lock().unwrap();
@@ -793,13 +827,13 @@ impl InnerHandle {
         }
     }
 
-    pub fn remove_global<D: 'static>(&self, id: InnerGlobalId) {
+    pub fn remove_global<D: 'static>(&self, id: &InnerGlobalId) {
         {
             let mut state = self.state.lock().unwrap();
             let state = (&mut *state as &mut dyn Any)
                 .downcast_mut::<State<D>>()
                 .expect("Wrong type parameter passed to Handle::remove_global().");
-            state.known_globals.retain(|g| g != &id);
+            state.known_globals.retain(|g| g != id);
         }
 
         if !id.alive.load(Ordering::Acquire) {
@@ -817,19 +851,19 @@ impl InnerHandle {
         });
     }
 
-    pub fn global_info(&self, id: InnerGlobalId) -> Result<GlobalInfo, InvalidId> {
+    pub fn global_info(&self, id: &InnerGlobalId) -> Result<GlobalInfo, InvalidId> {
         self.state.lock().unwrap().global_info(id)
     }
 
     #[cfg(feature = "libwayland_server_1_22")]
-    pub fn global_name(&self, global: InnerGlobalId, client: InnerClientId) -> Option<u32> {
+    pub fn global_name(&self, global: &InnerGlobalId, client: &InnerClientId) -> Option<u32> {
         self.state.lock().unwrap().global_name(global, client)
     }
 
     /// Returns the handler which manages the visibility and notifies when a client has bound the global.
     pub fn get_global_handler<D: 'static>(
         &self,
-        id: InnerGlobalId,
+        id: &InnerGlobalId,
     ) -> Result<Arc<dyn GlobalHandler<D>>, InvalidId> {
         let mut state = self.state.lock().unwrap();
         // Keep this guard alive while the code is run to protect the C state
@@ -848,7 +882,7 @@ impl InnerHandle {
         Ok(udata.handler.clone())
     }
 
-    pub fn flush(&self, client: Option<ClientId>) -> std::io::Result<()> {
+    pub fn flush(&self, client: Option<&ClientId>) -> std::io::Result<()> {
         self.state.lock().unwrap().flush(client)
     }
 
@@ -865,7 +899,7 @@ impl InnerHandle {
     }
 
     #[cfg(feature = "libwayland_server_1_23")]
-    pub fn set_client_max_buffer_size(&self, client: InnerClientId, max_buffer_size: usize) {
+    pub fn set_client_max_buffer_size(&self, client: &InnerClientId, max_buffer_size: usize) {
         self.state.lock().unwrap().set_client_max_buffer_size(client, max_buffer_size)
     }
 
@@ -875,55 +909,58 @@ impl InnerHandle {
 }
 
 pub(crate) trait ErasedState: Any {
-    fn object_info(&self, id: InnerObjectId) -> Result<ObjectInfo, InvalidId>;
+    fn object_info(&self, id: &InnerObjectId) -> Result<ObjectInfo, InvalidId>;
     fn insert_client(
         &self,
         stream: UnixStream,
         data: Arc<dyn ClientData>,
     ) -> std::io::Result<InnerClientId>;
-    fn get_client(&self, id: InnerObjectId) -> Result<ClientId, InvalidId>;
-    fn get_client_credentials(&self, id: InnerClientId) -> Result<Credentials, InvalidId>;
-    fn get_client_data(&self, id: InnerClientId) -> Result<Arc<dyn ClientData>, InvalidId>;
-    fn with_all_clients(&self, f: &mut dyn FnMut(ClientId));
+    fn get_client(&self, id: &InnerObjectId) -> Result<ClientId, InvalidId>;
+    fn get_client_credentials(&self, id: &InnerClientId) -> Result<Credentials, InvalidId>;
+    fn get_client_data(&self, id: &InnerClientId) -> Result<Arc<dyn ClientData>, InvalidId>;
+    fn with_all_clients(&self, f: &mut dyn FnMut(&ClientId));
     fn with_all_objects_for(
         &self,
-        client_id: InnerClientId,
-        f: &mut dyn FnMut(ObjectId),
+        client_id: &InnerClientId,
+        f: &mut dyn FnMut(&ObjectId),
     ) -> Result<(), InvalidId>;
     fn object_for_protocol_id(
         &self,
-        client_id: InnerClientId,
+        client_id: &InnerClientId,
         interface: &'static Interface,
         protocol_id: u32,
     ) -> Result<ObjectId, InvalidId>;
     fn get_object_data_any(
         &self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
     ) -> Result<Arc<dyn std::any::Any + Send + Sync>, InvalidId>;
-    fn send_event(&mut self, msg: Message<ObjectId, BorrowedFd>) -> Result<(), InvalidId>;
-    fn post_error(&mut self, object_id: InnerObjectId, error_code: u32, message: CString);
-    fn kill_client(&mut self, client_id: InnerClientId, reason: DisconnectReason);
-    fn global_info(&self, id: InnerGlobalId) -> Result<GlobalInfo, InvalidId>;
+    fn send_event(&mut self, msg: Message<ObjectId>) -> Result<(), InvalidId>;
+    fn post_error(&mut self, object_id: &InnerObjectId, error_code: u32, message: CString);
+    fn kill_client(&mut self, client_id: &InnerClientId, reason: DisconnectReason);
+    fn global_info(&self, id: &InnerGlobalId) -> Result<GlobalInfo, InvalidId>;
     #[cfg(feature = "libwayland_server_1_22")]
-    fn global_name(&self, global: InnerGlobalId, client: InnerClientId) -> Option<u32>;
+    fn global_name(&self, global: &InnerGlobalId, client: &InnerClientId) -> Option<u32>;
     fn is_known_global(&self, global_ptr: *const wl_global) -> bool;
-    fn flush(&mut self, client: Option<ClientId>) -> std::io::Result<()>;
+    fn flush(&mut self, client: Option<&ClientId>) -> std::io::Result<()>;
     #[cfg(feature = "libwayland_server_1_23")]
-    fn set_client_max_buffer_size(&mut self, client: InnerClientId, max_buffer_size: usize);
+    fn set_client_max_buffer_size(&mut self, client: &InnerClientId, max_buffer_size: usize);
     fn display_ptr(&self) -> *mut wl_display;
 }
 
 impl<D: 'static> ErasedState for State<D> {
-    fn object_info(&self, id: InnerObjectId) -> Result<ObjectInfo, InvalidId> {
-        if !id.alive.load(Ordering::Acquire) {
+    fn object_info(&self, id: &InnerObjectId) -> Result<ObjectInfo, InvalidId> {
+        let InnerObjectId::Resource(resource) = id else {
+            return Err(InvalidId);
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
 
-        let version =
-            unsafe { ffi_dispatch!(wayland_server_handle(), wl_resource_get_version, id.ptr) }
-                as u32;
+        let version = unsafe {
+            ffi_dispatch!(wayland_server_handle(), wl_resource_get_version, resource.ptr.as_ptr())
+        } as u32;
 
-        Ok(ObjectInfo { id: id.id, version, interface: id.interface })
+        Ok(ObjectInfo { id: u32::from(resource.id), version, interface: resource.interface })
     }
 
     fn insert_client(
@@ -947,18 +984,25 @@ impl<D: 'static> ErasedState for State<D> {
         Ok(unsafe { init_client(ret, data) })
     }
 
-    fn get_client(&self, id: InnerObjectId) -> Result<ClientId, InvalidId> {
-        if !id.alive.load(Ordering::Acquire) {
+    fn get_client(&self, id: &InnerObjectId) -> Result<ClientId, InvalidId> {
+        let InnerObjectId::Resource(resource) = id else {
+            return Err(InvalidId);
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
 
         unsafe {
-            let client_ptr = ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, id.ptr);
+            let client_ptr = ffi_dispatch!(
+                wayland_server_handle(),
+                wl_resource_get_client,
+                resource.ptr.as_ptr()
+            );
             client_id_from_ptr(client_ptr).ok_or(InvalidId).map(|id| ClientId { id })
         }
     }
 
-    fn get_client_data(&self, id: InnerClientId) -> Result<Arc<dyn ClientData>, InvalidId> {
+    fn get_client_data(&self, id: &InnerClientId) -> Result<Arc<dyn ClientData>, InvalidId> {
         if !id.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
@@ -973,7 +1017,7 @@ impl<D: 'static> ErasedState for State<D> {
         Ok(data.data.clone())
     }
 
-    fn get_client_credentials(&self, id: InnerClientId) -> Result<Credentials, InvalidId> {
+    fn get_client_credentials(&self, id: &InnerClientId) -> Result<Credentials, InvalidId> {
         if !id.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
@@ -994,7 +1038,7 @@ impl<D: 'static> ErasedState for State<D> {
         Ok(creds)
     }
 
-    fn with_all_clients(&self, f: &mut dyn FnMut(ClientId)) {
+    fn with_all_clients(&self, f: &mut dyn FnMut(&ClientId)) {
         let mut client_list = unsafe {
             ffi_dispatch!(wayland_server_handle(), wl_display_get_client_list, self.display)
         };
@@ -1003,7 +1047,7 @@ impl<D: 'static> ErasedState for State<D> {
                 let client =
                     ffi_dispatch!(wayland_server_handle(), wl_client_from_link, client_list);
                 if let Some(id) = client_id_from_ptr(client) {
-                    f(ClientId { id })
+                    f(&ClientId { id })
                 }
 
                 client_list = (*client_list).next;
@@ -1013,8 +1057,8 @@ impl<D: 'static> ErasedState for State<D> {
 
     fn with_all_objects_for(
         &self,
-        client_id: InnerClientId,
-        mut f: &mut dyn FnMut(ObjectId),
+        client_id: &InnerClientId,
+        mut f: &mut dyn FnMut(&ObjectId),
     ) -> Result<(), InvalidId> {
         if !client_id.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
@@ -1054,7 +1098,7 @@ impl<D: 'static> ErasedState for State<D> {
 
     fn object_for_protocol_id(
         &self,
-        client_id: InnerClientId,
+        client_id: &InnerClientId,
         interface: &'static Interface,
         protocol_id: u32,
     ) -> Result<ObjectId, InvalidId> {
@@ -1073,13 +1117,16 @@ impl<D: 'static> ErasedState for State<D> {
 
     fn get_object_data_any(
         &self,
-        id: InnerObjectId,
+        id: &InnerObjectId,
     ) -> Result<Arc<dyn std::any::Any + Send + Sync>, InvalidId> {
-        if !id.alive.load(Ordering::Acquire) {
+        let InnerObjectId::Resource(resource) = id else {
+            return Err(InvalidId);
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
 
-        let iface_c_ptr = &id
+        let iface_c_ptr = &resource
             .interface
             .c_interface
             .expect("[wayland-backend-sys] Cannot use Interface without c_interface!")
@@ -1088,7 +1135,7 @@ impl<D: 'static> ErasedState for State<D> {
             ffi_dispatch!(
                 wayland_server_handle(),
                 wl_resource_instance_of,
-                id.ptr,
+                resource.ptr.as_ptr(),
                 iface_c_ptr,
                 &RUST_MANAGED as *const u8 as *const _
             ) != 0
@@ -1098,8 +1145,11 @@ impl<D: 'static> ErasedState for State<D> {
         }
 
         let udata = unsafe {
-            &*(ffi_dispatch!(wayland_server_handle(), wl_resource_get_user_data, id.ptr)
-                as *mut ResourceUserData<D>)
+            &*(ffi_dispatch!(
+                wayland_server_handle(),
+                wl_resource_get_user_data,
+                resource.ptr.as_ptr()
+            ) as *mut ResourceUserData<D>)
         };
 
         Ok(udata.data.clone())
@@ -1107,23 +1157,33 @@ impl<D: 'static> ErasedState for State<D> {
 
     fn send_event(
         &mut self,
-        Message { sender_id: ObjectId { id }, opcode, args }: Message<ObjectId, BorrowedFd>,
+        Message { sender_id: ObjectId { id }, opcode, args }: Message<ObjectId>,
     ) -> Result<(), InvalidId> {
-        if !id.alive.load(Ordering::Acquire) || id.ptr.is_null() {
+        let InnerObjectId::Resource(resource) = &id else {
+            return Err(InvalidId);
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
 
         // check that the argument list is valid
-        let message_desc = match id.interface.events.get(opcode as usize) {
+        let message_desc = match resource.interface.events.get(opcode as usize) {
             Some(msg) => msg,
             None => {
-                panic!("Unknown opcode {} for object {}@{}.", opcode, id.interface.name, id.id);
+                panic!(
+                    "Unknown opcode {} for object {}@{}.",
+                    opcode, resource.interface.name, resource.id
+                );
             }
         };
         if !check_for_signature(message_desc.signature, &args) {
             panic!(
                 "Unexpected signature for request {}@{}.{}: expected {:?}, got {:?}.",
-                id.interface.name, id.id, message_desc.name, message_desc.signature, args
+                resource.interface.name,
+                resource.id,
+                message_desc.name,
+                message_desc.signature,
+                args
             );
         }
 
@@ -1145,49 +1205,52 @@ impl<D: 'static> ErasedState for State<D> {
                 }
                 Argument::Str(Some(ref s)) => argument_list.push(wl_argument { s: s.as_ptr() }),
                 Argument::Str(None) => argument_list.push(wl_argument { s: std::ptr::null() }),
-                Argument::Object(ref o) => {
+                Argument::Object(o) => {
                     let next_interface = arg_interfaces.next().unwrap();
-                    if !o.id.ptr.is_null() {
-                        if !o.id.alive.load(Ordering::Acquire) {
+                    let ptr = if let InnerObjectId::Resource(r) = &o.id {
+                        if !r.alive.load(Ordering::Acquire) {
                             unsafe { free_arrays(message_desc.signature, &argument_list) };
                             return Err(InvalidId);
                         }
                         // check that the object belongs to the right client
-                        if self.get_client(id.clone()).unwrap().id.ptr
-                            != self.get_client(o.id.clone()).unwrap().id.ptr
+                        if self.get_client(id).unwrap().id.ptr
+                            != self.get_client(&o.id).unwrap().id.ptr
                         {
                             panic!("Attempting to send an event with objects from wrong client.");
                         }
-                        if !same_interface(next_interface, o.id.interface) {
+                        if !same_interface(next_interface, r.interface) {
                             panic!(
                                 "Event {}@{}.{} expects an argument of interface {} but {} was provided instead.",
-                                id.interface.name,
-                                id.id,
+                                resource.interface.name,
+                                resource.id,
                                 message_desc.name,
                                 next_interface.name,
-                                o.id.interface.name
+                                r.interface.name
                             );
                         }
+                        r.ptr.as_ptr()
                     } else if !matches!(
                         message_desc.signature[i],
                         ArgumentType::Object(AllowNull::Yes)
                     ) {
                         panic!(
                             "Event {}@{}.{} expects an non-null object argument.",
-                            id.interface.name, id.id, message_desc.name
-                        );
-                    }
-                    argument_list.push(wl_argument { o: o.id.ptr as *const _ })
+                            resource.interface.name, resource.id, message_desc.name
+                        )
+                    } else {
+                        ptr::null()
+                    };
+                    argument_list.push(wl_argument { o: ptr as *const _ })
                 }
-                Argument::NewId(ref o) => {
-                    if !o.id.ptr.is_null() {
-                        if !id.alive.load(Ordering::Acquire) {
+                Argument::NewId(o) => {
+                    let ptr = if let InnerObjectId::Resource(r) = &o.id {
+                        if !r.alive.load(Ordering::Acquire) {
                             unsafe { free_arrays(message_desc.signature, &argument_list) };
                             return Err(InvalidId);
                         }
                         // check that the object belongs to the right client
-                        if self.get_client(id.clone()).unwrap().id.ptr
-                            != self.get_client(o.id.clone()).unwrap().id.ptr
+                        if self.get_client(id).unwrap().id.ptr
+                            != self.get_client(&o.id).unwrap().id.ptr
                         {
                             panic!("Attempting to send an event with objects from wrong client.");
                         }
@@ -1195,26 +1258,29 @@ impl<D: 'static> ErasedState for State<D> {
                             Some(iface) => iface,
                             None => panic!(
                                 "Trying to send event {}@{}.{} which creates an object without specifying its interface, this is unsupported.",
-                                id.interface.name, id.id, message_desc.name
+                                resource.interface.name, resource.id, message_desc.name
                             ),
                         };
-                        if !same_interface(child_interface, o.id.interface) {
+                        if !same_interface(child_interface, r.interface) {
                             panic!(
                                 "Event {}@{}.{} expects an argument of interface {} but {} was provided instead.",
-                                id.interface.name,
-                                id.id,
+                                resource.interface.name,
+                                resource.id,
                                 message_desc.name,
                                 child_interface.name,
-                                o.id.interface.name
+                                r.interface.name
                             );
                         }
+                        r.ptr.as_ptr()
                     } else if !matches!(message_desc.signature[i], ArgumentType::NewId) {
                         panic!(
                             "Event {}@{}.{} expects an non-null object argument.",
-                            id.interface.name, id.id, message_desc.name
-                        );
-                    }
-                    argument_list.push(wl_argument { o: o.id.ptr as *const _ })
+                            resource.interface.name, resource.id, message_desc.name
+                        )
+                    } else {
+                        ptr::null()
+                    };
+                    argument_list.push(wl_argument { o: ptr as *const _ })
                 }
             }
         }
@@ -1223,7 +1289,7 @@ impl<D: 'static> ErasedState for State<D> {
             ffi_dispatch!(
                 wayland_server_handle(),
                 wl_resource_post_event_array,
-                id.ptr,
+                resource.ptr.as_ptr(),
                 opcode as u32,
                 argument_list.as_mut_ptr()
             );
@@ -1238,7 +1304,11 @@ impl<D: 'static> ErasedState for State<D> {
             PENDING_DESTRUCTORS.set(
                 &(&mut self.pending_destructors as *mut _ as *mut _),
                 || unsafe {
-                    ffi_dispatch!(wayland_server_handle(), wl_resource_destroy, id.ptr);
+                    ffi_dispatch!(
+                        wayland_server_handle(),
+                        wl_resource_destroy,
+                        resource.ptr.as_ptr()
+                    );
                 },
             );
         }
@@ -1246,14 +1316,18 @@ impl<D: 'static> ErasedState for State<D> {
         Ok(())
     }
 
-    fn post_error(&mut self, id: InnerObjectId, error_code: u32, message: CString) {
-        if !id.alive.load(Ordering::Acquire) {
+    fn post_error(&mut self, id: &InnerObjectId, error_code: u32, message: CString) {
+        let InnerObjectId::Resource(resource) = id else {
+            return;
+        };
+        if !resource.alive.load(Ordering::Acquire) {
             return;
         }
 
         // Safety: at this point we already checked that the pointer is valid
-        let client =
-            unsafe { ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, id.ptr) };
+        let client = unsafe {
+            ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, resource.ptr.as_ptr())
+        };
         let client_id = unsafe { client_id_from_ptr(client) }.unwrap();
         // mark the client as dead
         client_id.alive.store(false, Ordering::Release);
@@ -1262,21 +1336,21 @@ impl<D: 'static> ErasedState for State<D> {
             ffi_dispatch!(
                 wayland_server_handle(),
                 wl_resource_post_error,
-                id.ptr,
+                resource.ptr.as_ptr(),
                 error_code,
                 message.as_ptr()
             )
         }
     }
 
-    fn kill_client(&mut self, client_id: InnerClientId, reason: DisconnectReason) {
+    fn kill_client(&mut self, client_id: &InnerClientId, reason: DisconnectReason) {
         if !client_id.alive.load(Ordering::Acquire) {
             return;
         }
         if let Some(udata) = unsafe { client_user_data(client_id.ptr) } {
             let udata = unsafe { &*udata };
             udata.alive.store(false, Ordering::Release);
-            udata.data.disconnected(ClientId { id: client_id.clone() }, reason);
+            udata.data.disconnected(&ClientId { id: client_id.clone() }, reason);
         }
 
         // wl_client_destroy invokes destructors
@@ -1285,7 +1359,7 @@ impl<D: 'static> ErasedState for State<D> {
         });
     }
 
-    fn global_info(&self, id: InnerGlobalId) -> Result<GlobalInfo, InvalidId> {
+    fn global_info(&self, id: &InnerGlobalId) -> Result<GlobalInfo, InvalidId> {
         if !id.alive.load(Ordering::Acquire) {
             return Err(InvalidId);
         }
@@ -1302,7 +1376,7 @@ impl<D: 'static> ErasedState for State<D> {
     }
 
     #[cfg(feature = "libwayland_server_1_22")]
-    fn global_name(&self, global: InnerGlobalId, client: InnerClientId) -> Option<u32> {
+    fn global_name(&self, global: &InnerGlobalId, client: &InnerClientId) -> Option<u32> {
         if !global.alive.load(Ordering::Acquire) {
             return None;
         }
@@ -1322,7 +1396,7 @@ impl<D: 'static> ErasedState for State<D> {
         self.known_globals.iter().any(|ginfo| std::ptr::eq(ginfo.ptr, global_ptr))
     }
 
-    fn flush(&mut self, client: Option<ClientId>) -> std::io::Result<()> {
+    fn flush(&mut self, client: Option<&ClientId>) -> std::io::Result<()> {
         if let Some(ClientId { id: client_id }) = client {
             if client_id.alive.load(Ordering::Acquire) {
                 unsafe { ffi_dispatch!(wayland_server_handle(), wl_client_flush, client_id.ptr) }
@@ -1352,7 +1426,7 @@ impl<D: 'static> ErasedState for State<D> {
     }
 
     #[cfg(feature = "libwayland_server_1_23")]
-    fn set_client_max_buffer_size(&mut self, client: InnerClientId, max_buffer_size: usize) {
+    fn set_client_max_buffer_size(&mut self, client: &InnerClientId, max_buffer_size: usize) {
         if client.alive.load(Ordering::Acquire) {
             unsafe {
                 ffi_dispatch!(
@@ -1423,7 +1497,7 @@ unsafe extern "C" fn client_destroy_notify(listener: *mut wl_listener, client_pt
     if data.alive.load(Ordering::Acquire) {
         data.alive.store(false, Ordering::Release);
         data.data.disconnected(
-            ClientId {
+            &ClientId {
                 id: InnerClientId { ptr: client_ptr as *mut wl_client, alive: data.alive.clone() },
             },
             DisconnectReason::ConnectionClosed,
@@ -1468,9 +1542,9 @@ unsafe extern "C" fn global_bind<D: 'static>(
         let obj_data = global_udata.handler.clone().bind(
             &Handle { handle: InnerHandle { state: state_arc.clone() } },
             data,
-            ClientId { id: client_id },
-            GlobalId { id: global_id },
-            ObjectId { id: object_id },
+            &ClientId { id: client_id },
+            &GlobalId { id: global_id },
+            &ObjectId { id: object_id },
         );
         // Safety: udata was just created, it is valid
         unsafe { (*udata).data = obj_data };
@@ -1517,9 +1591,9 @@ unsafe extern "C" fn global_filter<D: 'static>(
         InnerGlobalId { ptr: global as *mut wl_global, alive: global_udata.alive.clone() };
 
     global_udata.handler.can_view(
-        ClientId { id: client_id },
+        &ClientId { id: client_id },
         &client_udata.data,
-        GlobalId { id: global_id },
+        &GlobalId { id: global_id },
     )
 }
 
@@ -1534,7 +1608,8 @@ unsafe fn init_resource<D: 'static>(
         interface,
         alive: alive.clone(),
     }));
-    let id = ffi_dispatch!(wayland_server_handle(), wl_resource_get_id, resource);
+    let id =
+        NonZero::new(ffi_dispatch!(wayland_server_handle(), wl_resource_get_id, resource)).unwrap();
 
     ffi_dispatch!(
         wayland_server_handle(),
@@ -1546,7 +1621,15 @@ unsafe fn init_resource<D: 'static>(
         Some(resource_destructor::<D>)
     );
 
-    (InnerObjectId { interface, alive, id, ptr: resource }, udata)
+    (
+        InnerObjectId::Resource(Resource {
+            interface,
+            alive,
+            id,
+            ptr: NonNull::new(resource).unwrap(),
+        }),
+        udata,
+    )
 }
 
 unsafe extern "C" fn resource_dispatcher<D: 'static>(
@@ -1574,33 +1657,36 @@ unsafe extern "C" fn resource_dispatcher<D: 'static>(
     };
 
     let mut parsed_args =
-        SmallVec::<[Argument<ObjectId, OwnedFd>; 4]>::with_capacity(message_desc.signature.len());
+        SmallVec::<[OwnedArgument<ObjectId>; 4]>::with_capacity(message_desc.signature.len());
     let mut arg_interfaces = message_desc.arg_interfaces.iter().copied();
     let mut created = None;
     // Safety (args deference): the args array provided by libwayland is well-formed
     for (i, typ) in message_desc.signature.iter().enumerate() {
         match typ {
-            ArgumentType::Uint => parsed_args.push(Argument::Uint(unsafe { (*args.add(i)).u })),
-            ArgumentType::Int => parsed_args.push(Argument::Int(unsafe { (*args.add(i)).i })),
-            ArgumentType::Fixed => parsed_args.push(Argument::Fixed(unsafe { (*args.add(i)).f })),
-            ArgumentType::Fd => {
-                parsed_args.push(Argument::Fd(unsafe { OwnedFd::from_raw_fd((*args.add(i)).h) }))
+            ArgumentType::Uint => {
+                parsed_args.push(OwnedArgument::Uint(unsafe { (*args.add(i)).u }))
             }
+            ArgumentType::Int => parsed_args.push(OwnedArgument::Int(unsafe { (*args.add(i)).i })),
+            ArgumentType::Fixed => {
+                parsed_args.push(OwnedArgument::Fixed(unsafe { (*args.add(i)).f }))
+            }
+            ArgumentType::Fd => parsed_args
+                .push(OwnedArgument::Fd(unsafe { OwnedFd::from_raw_fd((*args.add(i)).h) })),
             ArgumentType::Array => {
                 let array = unsafe { &*((*args.add(i)).a) };
                 // Safety: the wl_array provided by libwayland is valid
                 let content =
                     unsafe { std::slice::from_raw_parts(array.data as *mut u8, array.size) };
-                parsed_args.push(Argument::Array(Box::new(content.into())));
+                parsed_args.push(OwnedArgument::Array(Box::new(content.into())));
             }
             ArgumentType::Str(_) => {
                 let ptr = unsafe { (*args.add(i)).s };
                 // Safety: the c-string provided by libwayland is valid
                 if !ptr.is_null() {
                     let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
-                    parsed_args.push(Argument::Str(Some(Box::new(cstr.into()))));
+                    parsed_args.push(OwnedArgument::Str(Some(Box::new(cstr.into()))));
                 } else {
-                    parsed_args.push(Argument::Str(None));
+                    parsed_args.push(OwnedArgument::Str(None));
                 }
             }
             ArgumentType::Object(_) => {
@@ -1613,9 +1699,9 @@ unsafe extern "C" fn resource_dispatcher<D: 'static>(
                     }
                 } else {
                     // libwayland-server.so checks nulls for us
-                    InnerHandle::null_id()
+                    InnerHandle::null_id().clone()
                 };
-                parsed_args.push(Argument::Object(id))
+                parsed_args.push(OwnedArgument::Object(id))
             }
             ArgumentType::NewId => {
                 let new_id = unsafe { (*args.add(i)).n };
@@ -1641,21 +1727,21 @@ unsafe extern "C" fn resource_dispatcher<D: 'static>(
                     let (child_id, child_data_ptr) =
                         unsafe { init_resource::<D>(resource, child_interface, None) };
                     created = Some((child_id.clone(), child_data_ptr));
-                    parsed_args.push(Argument::NewId(ObjectId { id: child_id }));
+                    parsed_args.push(OwnedArgument::NewId(ObjectId { id: child_id }));
                 } else {
-                    parsed_args.push(Argument::NewId(InnerHandle::null_id()))
+                    parsed_args.push(OwnedArgument::NewId(InnerHandle::null_id().clone()))
                 }
             }
         }
     }
 
     let object_id = ObjectId {
-        id: InnerObjectId {
-            ptr: resource,
-            id: resource_id,
+        id: InnerObjectId::Resource(Resource {
+            ptr: NonNull::new(resource).unwrap(),
+            id: NonZero::new(resource_id).unwrap(),
             interface: udata.interface,
             alive: udata.alive.clone(),
-        },
+        }),
     };
 
     // Safety: the client ptr is valid and provided by libwayland
@@ -1667,8 +1753,8 @@ unsafe extern "C" fn resource_dispatcher<D: 'static>(
         udata.data.clone().request(
             &Handle { handle: InnerHandle { state: state_arc.clone() } },
             data,
-            ClientId { id: client_id.clone() },
-            Message { sender_id: object_id.clone(), opcode: opcode as u16, args: parsed_args },
+            &ClientId { id: client_id.clone() },
+            OwnedMessage { sender_id: object_id.clone(), opcode: opcode as u16, args: parsed_args },
         )
     });
 
@@ -1701,7 +1787,8 @@ unsafe extern "C" fn resource_destructor<D: 'static>(resource: *mut wl_resource)
         Box::from_raw(ffi_dispatch!(wayland_server_handle(), wl_resource_get_user_data, resource)
             as *mut ResourceUserData<D>)
     };
-    let id = ffi_dispatch!(wayland_server_handle(), wl_resource_get_id, resource);
+    let id =
+        NonZero::new(ffi_dispatch!(wayland_server_handle(), wl_resource_get_id, resource)).unwrap();
     let client = ffi_dispatch!(wayland_server_handle(), wl_resource_get_client, resource);
     // if this destructor is invoked during cleanup, the client ptr is no longer valid and it'll return None
     let client_id = unsafe { client_id_from_ptr(client) }.unwrap_or(InnerClientId {
@@ -1709,8 +1796,12 @@ unsafe extern "C" fn resource_destructor<D: 'static>(resource: *mut wl_resource)
         alive: Arc::new(AtomicBool::new(false)),
     });
     udata.alive.store(false, Ordering::Release);
-    let object_id =
-        InnerObjectId { interface: udata.interface, ptr: resource, alive: udata.alive.clone(), id };
+    let object_id = InnerObjectId::Resource(Resource {
+        interface: udata.interface,
+        ptr: NonNull::new(resource).unwrap(),
+        alive: udata.alive.clone(),
+        id,
+    });
     // Due to reentrancy, it is possible that both HANDLE and PENDING_DESTRUCTORS are set at the same time
     // If this is the case, PENDING_DESTRUCTORS should have priority
     if !PENDING_DESTRUCTORS.is_set() {
@@ -1720,8 +1811,8 @@ unsafe extern "C" fn resource_destructor<D: 'static>(resource: *mut wl_resource)
             udata.data.destroyed(
                 &Handle { handle: InnerHandle { state: state_arc.clone() } },
                 data,
-                ClientId { id: client_id },
-                ObjectId { id: object_id },
+                &ClientId { id: client_id },
+                &ObjectId { id: object_id },
             );
         });
     } else {
@@ -1750,14 +1841,14 @@ impl<D> ObjectData<D> for UninitObjectData {
         self: Arc<Self>,
         _: &Handle,
         _: &mut D,
-        _: ClientId,
-        msg: Message<ObjectId, OwnedFd>,
+        _: &ClientId,
+        msg: OwnedMessage<ObjectId>,
     ) -> Option<Arc<dyn ObjectData<D>>> {
         panic!("Received a message on an uninitialized object: {msg:?}");
     }
 
     #[cfg_attr(unstable_coverage, coverage(off))]
-    fn destroyed(self: Arc<Self>, _: &Handle, _: &mut D, _: ClientId, _: ObjectId) {}
+    fn destroyed(self: Arc<Self>, _: &Handle, _: &mut D, _: &ClientId, _: &ObjectId) {}
 
     #[cfg_attr(unstable_coverage, coverage(off))]
     fn debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

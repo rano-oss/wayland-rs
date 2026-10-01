@@ -50,7 +50,7 @@ fn resource_equals() {
     let cloned = server_ddata.outputs[0].clone();
     assert!(server_ddata.outputs[0] == cloned);
 
-    assert!(server_ddata.outputs[0].id().same_client_as(&server_ddata.outputs[1].id()));
+    assert!(server_ddata.outputs[0].id().same_client_as(server_ddata.outputs[1].id()));
 }
 
 #[test]
